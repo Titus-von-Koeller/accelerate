@@ -104,8 +104,24 @@ def test_training_with_gradient_accumulation(tmp_path, version):
     assert max(accumulated["final_losses"]) < accumulated["losses"][0] - 0.01
 
 
-@pytest.mark.parametrize("version", VERSIONS)
-@pytest.mark.parametrize("state_dict_type", ["FULL_STATE_DICT", "SHARDED_STATE_DICT"])
+@pytest.mark.parametrize(
+    "version, state_dict_type",
+    [
+        pytest.param(1, "FULL_STATE_DICT", id="fsdp1-full"),
+        pytest.param(
+            1,
+            "SHARDED_STATE_DICT",
+            id="fsdp1-sharded",
+            marks=pytest.mark.xfail(
+                strict=True,
+                raises=AssertionError,
+                reason="FSDP1 sharded optimizer loading omits uninitialized momentum state",
+            ),
+        ),
+        pytest.param(2, "FULL_STATE_DICT", marks=FSDP2, id="fsdp2-full"),
+        pytest.param(2, "SHARDED_STATE_DICT", marks=FSDP2, id="fsdp2-sharded"),
+    ],
+)
 def test_checkpoint_resume(tmp_path, version, state_dict_type):
     """Resume in fresh processes at an update boundary with momentum and scheduler state."""
     args = fsdp_args(version, state_dict_type=state_dict_type)
