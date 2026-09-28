@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
+
 import pytest
 import torch
 
@@ -34,24 +36,33 @@ pytestmark = [
 STAGES = [pytest.param(2, id="zero2"), pytest.param(3, id="zero3")]
 
 
-def deepspeed_args(stage, accumulation_steps=1):
-    return [
-        "--use_deepspeed",
-        f"--zero_stage={stage}",
-        f"--gradient_accumulation_steps={accumulation_steps}",
-        "--gradient_clipping=0",
-        "--offload_optimizer_device=none",
-        "--offload_param_device=none",
-        "--zero3_init_flag=false",
-        "--zero3_save_16bit_model=false",
-    ]
+def deepspeed_args(directory, stage, accumulation_steps=1):
+    config = {
+        "train_micro_batch_size_per_gpu": "auto",
+        "train_batch_size": "auto",
+        "gradient_accumulation_steps": accumulation_steps,
+        "gradient_clipping": 0,
+        # Match PyTorch's initial scale; 2**32 can spend this short run only backing off.
+        "fp16": {"enabled": "auto", "initial_scale_power": 16},
+        "bf16": {"enabled": "auto"},
+        "zero_optimization": {
+            "stage": stage,
+            # The default 500M-element buffers dwarf this tiny model.
+            "reduce_bucket_size": 1_000_000,
+            "allgather_bucket_size": 1_000_000,
+            "stage3_prefetch_bucket_size": 1_000_000,
+        },
+    }
+    config_file = directory / f"zero{stage}-accumulation{accumulation_steps}.json"
+    config_file.write_text(json.dumps(config), encoding="utf-8")
+    return ["--use_deepspeed", f"--deepspeed_config_file={config_file}", "--zero3_init_flag=false"]
 
 
 @pytest.mark.parametrize("stage", STAGES)
 def test_training(tmp_path, stage):
     """Compare ZeRO with PyTorch on the same eight blocks per update."""
     reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8)
-    trained = run_training(tmp_path / "deepspeed.json", launch_args=deepspeed_args(stage))
+    trained = run_training(tmp_path / "deepspeed.json", launch_args=deepspeed_args(tmp_path, stage))
     assert trained["backend"] == "DEEPSPEED"
     assert trained["world_size"] == 2
     assert len(trained["losses"]) == len(reference["losses"]) == 10
@@ -68,7 +79,9 @@ def test_training(tmp_path, stage):
 )
 def test_training_mixed_precision(tmp_path, stage, precision):
     """Complete ten updates with DeepSpeed's requested compute dtype and lower the loss."""
-    trained = run_training(tmp_path / "deepspeed.json", launch_args=deepspeed_args(stage), mixed_precision=precision)
+    trained = run_training(
+        tmp_path / "deepspeed.json", launch_args=deepspeed_args(tmp_path, stage), mixed_precision=precision
+    )
     assert trained["backend"] == "DEEPSPEED"
     assert trained["world_size"] == 2
     assert len(trained["losses"]) == 10
@@ -80,10 +93,10 @@ def test_training_mixed_precision(tmp_path, stage, precision):
 @pytest.mark.parametrize("stage", STAGES)
 def test_training_with_gradient_accumulation(tmp_path, stage):
     """Compare complete windows while DeepSpeed owns loss scaling and optimizer steps."""
-    large = run_training(tmp_path / "large.json", launch_args=deepspeed_args(stage), mixed_precision="bf16")
+    large = run_training(tmp_path / "large.json", launch_args=deepspeed_args(tmp_path, stage), mixed_precision="bf16")
     accumulated = run_training(
         tmp_path / "accumulated.json",
-        launch_args=deepspeed_args(stage, accumulation_steps=2),
+        launch_args=deepspeed_args(tmp_path, stage, accumulation_steps=2),
         mixed_precision="bf16",
         batch_size=2,
         gradient_accumulation_steps=2,
@@ -101,7 +114,7 @@ def test_training_with_gradient_accumulation(tmp_path, stage):
 def test_checkpoint_resume(tmp_path, stage):
     """Reload partitioned optimizer/model state in fresh processes and continue the same batches."""
     options = dict(
-        launch_args=deepspeed_args(stage, accumulation_steps=2),
+        launch_args=deepspeed_args(tmp_path, stage, accumulation_steps=2),
         mixed_precision="bf16",
         batch_size=2,
         gradient_accumulation_steps=2,
