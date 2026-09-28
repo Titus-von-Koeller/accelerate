@@ -183,6 +183,12 @@ def main():
             mixed_precision=args.mixed_precision,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
         )
+        if accelerator.distributed_type == DistributedType.DEEPSPEED:
+            # Default ZeRO communication buffers can dwarf this tiny model.
+            # Keep the fixture usable on GPUs shared with a desktop workload.
+            zero_config = accelerator.state.deepspeed_plugin.deepspeed_config["zero_optimization"]
+            zero_config["reduce_bucket_size"] = 100_000
+            zero_config["allgather_bucket_size"] = 100_000
     device = torch.device("cuda:0") if args.reference else accelerator.device
 
     set_seed(1337)
