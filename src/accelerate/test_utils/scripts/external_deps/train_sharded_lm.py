@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--save-at", type=int)
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--resume-at", type=int, default=0)
+    parser.add_argument("--optimizer", choices=("sgd", "sgd_plain", "adamw"), default="sgd")
     return parser.parse_args()
 
 
@@ -72,7 +73,10 @@ def main():
     dataloader = DataLoader(input_ids, batch_size=args.batch_size, shuffle=False)
     if args.reference:
         model.to(device)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
+    if args.optimizer == "adamw":
+        optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    else:
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9 if args.optimizer == "sgd" else 0)
     scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
     if accelerator is not None:
         model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)

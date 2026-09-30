@@ -32,6 +32,7 @@ def run_training(
     checkpoint=None,
     save_at=None,
     resume_at=0,
+    optimizer="sgd",
 ):
     command = [sys.executable]
     if not reference:
@@ -56,6 +57,8 @@ def run_training(
         mixed_precision,
         "--gradient-accumulation-steps",
         str(gradient_accumulation_steps),
+        "--optimizer",
+        optimizer,
     ]
     if reference:
         command.append("--reference")

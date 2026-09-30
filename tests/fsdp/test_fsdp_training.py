@@ -105,27 +105,20 @@ def test_training_with_gradient_accumulation(tmp_path, version):
 
 
 @pytest.mark.parametrize(
-    "version, state_dict_type",
+    "version, state_dict_type, optimizer",
     [
-        pytest.param(1, "FULL_STATE_DICT", id="fsdp1-full"),
-        pytest.param(
-            1,
-            "SHARDED_STATE_DICT",
-            id="fsdp1-sharded",
-            marks=pytest.mark.xfail(
-                strict=True,
-                raises=AssertionError,
-                reason="FSDP1 sharded optimizer loading omits uninitialized momentum state",
-            ),
-        ),
-        pytest.param(2, "FULL_STATE_DICT", marks=FSDP2, id="fsdp2-full"),
-        pytest.param(2, "SHARDED_STATE_DICT", marks=FSDP2, id="fsdp2-sharded"),
+        pytest.param(1, "FULL_STATE_DICT", "sgd", id="fsdp1-full"),
+        pytest.param(1, "SHARDED_STATE_DICT", "sgd", id="fsdp1-sharded-momentum"),
+        pytest.param(1, "SHARDED_STATE_DICT", "sgd_plain", id="fsdp1-sharded-plain"),
+        pytest.param(1, "SHARDED_STATE_DICT", "adamw", id="fsdp1-sharded-adamw"),
+        pytest.param(2, "FULL_STATE_DICT", "sgd", marks=FSDP2, id="fsdp2-full"),
+        pytest.param(2, "SHARDED_STATE_DICT", "sgd", marks=FSDP2, id="fsdp2-sharded"),
     ],
 )
-def test_checkpoint_resume(tmp_path, version, state_dict_type):
-    """Resume in fresh processes at an update boundary with momentum and scheduler state."""
+def test_checkpoint_resume(tmp_path, version, state_dict_type, optimizer):
+    """Resume in fresh processes at an update boundary with optimizer and scheduler state."""
     args = fsdp_args(version, state_dict_type=state_dict_type)
-    options = dict(launch_args=args, batch_size=2, gradient_accumulation_steps=2)
+    options = dict(launch_args=args, batch_size=2, gradient_accumulation_steps=2, optimizer=optimizer)
     uninterrupted = run_training(tmp_path / "full.json", **options)
     partial = run_training(tmp_path / "partial.json", **options, checkpoint=tmp_path / "checkpoint", save_at=5)
     resumed = run_training(tmp_path / "resumed.json", **options, checkpoint=tmp_path / "checkpoint", resume_at=5)
