@@ -105,26 +105,35 @@ def test_training_with_gradient_accumulation(tmp_path, version):
 
 
 @pytest.mark.parametrize(
-    "version, state_dict_type, optimizer",
+    "version, state_dict_type, optimizer, with_extra_state",
     [
-        pytest.param(1, "FULL_STATE_DICT", "sgd", id="fsdp1-full"),
-        pytest.param(1, "SHARDED_STATE_DICT", "sgd", id="fsdp1-sharded-momentum"),
-        pytest.param(1, "SHARDED_STATE_DICT", "sgd_plain", id="fsdp1-sharded-plain"),
-        pytest.param(1, "SHARDED_STATE_DICT", "adamw", id="fsdp1-sharded-adamw"),
-        pytest.param(2, "FULL_STATE_DICT", "sgd", marks=FSDP2, id="fsdp2-full"),
-        pytest.param(2, "SHARDED_STATE_DICT", "sgd", marks=FSDP2, id="fsdp2-sharded"),
+        pytest.param(1, "FULL_STATE_DICT", "sgd", False, id="fsdp1-full"),
+        pytest.param(1, "SHARDED_STATE_DICT", "sgd", False, id="fsdp1-sharded-momentum"),
+        pytest.param(1, "SHARDED_STATE_DICT", "sgd", True, id="fsdp1-sharded-extra-state"),
+        pytest.param(1, "SHARDED_STATE_DICT", "sgd_plain", False, id="fsdp1-sharded-plain"),
+        pytest.param(1, "SHARDED_STATE_DICT", "adamw", False, id="fsdp1-sharded-adamw"),
+        pytest.param(2, "FULL_STATE_DICT", "sgd", False, marks=FSDP2, id="fsdp2-full"),
+        pytest.param(2, "SHARDED_STATE_DICT", "sgd", False, marks=FSDP2, id="fsdp2-sharded"),
     ],
 )
-def test_checkpoint_resume(tmp_path, version, state_dict_type, optimizer):
+def test_checkpoint_resume(tmp_path, version, state_dict_type, optimizer, with_extra_state):
     """Resume in fresh processes at an update boundary with optimizer and scheduler state."""
     args = fsdp_args(version, state_dict_type=state_dict_type)
-    options = dict(launch_args=args, batch_size=2, gradient_accumulation_steps=2, optimizer=optimizer)
+    options = dict(
+        launch_args=args,
+        batch_size=2,
+        gradient_accumulation_steps=2,
+        optimizer=optimizer,
+        with_extra_state=with_extra_state,
+    )
     uninterrupted = run_training(tmp_path / "full.json", **options)
     partial = run_training(tmp_path / "partial.json", **options, checkpoint=tmp_path / "checkpoint", save_at=5)
     resumed = run_training(tmp_path / "resumed.json", **options, checkpoint=tmp_path / "checkpoint", resume_at=5)
 
     assert uninterrupted["backend"] == partial["backend"] == resumed["backend"] == "FSDP"
     assert uninterrupted["world_size"] == partial["world_size"] == resumed["world_size"] == 2
+    if with_extra_state:
+        assert partial["extra_state_revision"] == resumed["extra_state_revision"] == 5
     assert len(uninterrupted["losses"]) == 10
     assert len(partial["losses"]) == len(resumed["losses"]) == 5
     torch.testing.assert_close(partial["losses"] + resumed["losses"], uninterrupted["losses"], atol=1e-5, rtol=0)

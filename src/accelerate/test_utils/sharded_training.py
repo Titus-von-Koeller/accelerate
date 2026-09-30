@@ -33,6 +33,7 @@ def run_training(
     save_at=None,
     resume_at=0,
     optimizer="sgd",
+    with_extra_state=False,
 ):
     command = [sys.executable]
     if not reference:
@@ -62,6 +63,8 @@ def run_training(
     ]
     if reference:
         command.append("--reference")
+    if with_extra_state:
+        command.append("--with-extra-state")
     if checkpoint is not None:
         command += ["--checkpoint", str(checkpoint)]
     if save_at is not None:

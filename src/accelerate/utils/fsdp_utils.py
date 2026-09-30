@@ -413,8 +413,12 @@ def load_fsdp_optimizer(
                 if fsdp_plugin.fsdp_version == 1 and fsdp_plugin.state_dict_type == StateDictType.SHARDED_STATE_DICT:
                     from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
 
+                    # The optimizer loader needs tensor layout, while module extra state may be any object.
+                    model_state_dict = {
+                        key: value for key, value in model.state_dict().items() if isinstance(value, torch.Tensor)
+                    }
                     optim_state = load_sharded_optimizer_state_dict(
-                        model_state_dict=model.state_dict(),
+                        model_state_dict=model_state_dict,
                         optimizer_key="optimizer",
                         storage_reader=dist_cp.FileSystemReader(ckpt_dir),
                     )["optimizer"]

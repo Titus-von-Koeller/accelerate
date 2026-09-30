@@ -29,6 +29,18 @@ from accelerate import Accelerator
 from accelerate.utils import set_seed
 
 
+class CheckpointMetadata(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.revision = 0
+
+    def get_extra_state(self):
+        return {"revision": self.revision}
+
+    def set_extra_state(self, state):
+        self.revision = state["revision"]
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
@@ -40,6 +52,7 @@ def parse_args():
     parser.add_argument("--checkpoint", type=Path)
     parser.add_argument("--resume-at", type=int, default=0)
     parser.add_argument("--optimizer", choices=("sgd", "sgd_plain", "adamw"), default="sgd")
+    parser.add_argument("--with-extra-state", action="store_true")
     return parser.parse_args()
 
 
@@ -61,6 +74,9 @@ def main():
     checkpoint = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
     tokenizer = AutoTokenizer.from_pretrained(checkpoint)
     model = AutoModelForCausalLM.from_pretrained(checkpoint, dtype=torch.float32, use_cache=False)
+    metadata = CheckpointMetadata() if args.with_extra_state else None
+    if metadata is not None:
+        model.add_module("checkpoint_metadata", metadata)
     model.train()
     dtype = {"no": None, "fp16": torch.float16, "bf16": torch.bfloat16}[args.mixed_precision]
     if dtype is not None:
@@ -107,6 +123,8 @@ def main():
                 scheduler.step()
                 window_losses.clear()
         if args.save_at and len(losses) == args.save_at:
+            if metadata is not None:
+                metadata.revision = args.save_at
             accelerator.save_state(args.checkpoint)
             break
 
@@ -124,6 +142,8 @@ def main():
             "world_size": 1 if args.reference else accelerator.num_processes,
             "backend": "reference" if args.reference else accelerator.distributed_type.value,
         }
+        if metadata is not None:
+            result["extra_state_revision"] = metadata.revision
         args.output.write_text(json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     if accelerator is not None:
         accelerator.end_training()
