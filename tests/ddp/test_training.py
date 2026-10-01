@@ -12,18 +12,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import os
-import sys
 from pathlib import Path
 
 import pytest
 import torch
 
+from accelerate.test_utils.distributed_training import run_training
 from accelerate.test_utils.testing import (
-    execute_subprocess_async,
-    get_torch_dist_unique_port,
-    path_in_accelerate_package,
     require_cuda,
     require_huggingface_suite,
     require_multi_gpu,
@@ -39,10 +34,11 @@ def test_training(tmp_path):
     Compare DDP losses with single-GPU training on the same effective batches.
     A plain-PyTorch baseline can expose wrapper bugs that two Accelerate runs could share.
     """
-    reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8)
-    distributed = run_training(tmp_path / "ddp.json", batch_size=4)
+    reference = run_training(tmp_path / "reference.json", batch_size=8)
+    distributed = run_training(tmp_path / "ddp.json", config_file=Path(__file__).with_name("ddp.yaml"), batch_size=4)
 
     loss_tolerance = 1e-4
+    assert distributed["ranks"] == [{"backend": "MULTI_GPU", "world_size": 2}] * 2
     assert len(reference["losses"]) == len(distributed["losses"]) == 10
     torch.testing.assert_close(distributed["losses"], reference["losses"], atol=loss_tolerance, rtol=0)
     torch.testing.assert_close(distributed["final_loss"], reference["final_loss"], atol=loss_tolerance, rtol=0)
@@ -65,11 +61,15 @@ def test_training(tmp_path):
 @require_huggingface_suite
 def test_training_mixed_precision(tmp_path, mixed_precision, loss_tolerance):
     """Compare DDP with single-GPU training at the same requested precision."""
-    reference = run_training(
-        tmp_path / "reference.json", reference=True, batch_size=8, mixed_precision=mixed_precision
+    reference = run_training(tmp_path / "reference.json", batch_size=8, mixed_precision=mixed_precision)
+    distributed = run_training(
+        tmp_path / "ddp.json",
+        config_file=Path(__file__).with_name("ddp.yaml"),
+        batch_size=4,
+        mixed_precision=mixed_precision,
     )
-    distributed = run_training(tmp_path / "ddp.json", batch_size=4, mixed_precision=mixed_precision)
 
+    assert distributed["ranks"] == [{"backend": "MULTI_GPU", "world_size": 2}] * 2
     assert len(reference["losses"]) == len(distributed["losses"]) == 10
     torch.testing.assert_close(distributed["losses"], reference["losses"], atol=loss_tolerance, rtol=0)
     torch.testing.assert_close(distributed["final_loss"], reference["final_loss"], atol=loss_tolerance, rtol=0)
@@ -86,12 +86,15 @@ def test_training_mixed_precision(tmp_path, mixed_precision, loss_tolerance):
 @require_huggingface_suite
 def test_training_with_gradient_accumulation(tmp_path):
     """Keep BF16 and eight blocks per update: 2 ranks * 4 blocks, or 2 ranks * 2 blocks * 2 steps."""
-    large_batch = run_training(tmp_path / "large.json", batch_size=4, mixed_precision="bf16")
+    large_batch = run_training(
+        tmp_path / "large.json", config_file=Path(__file__).with_name("ddp.yaml"), batch_size=4, mixed_precision="bf16"
+    )
     accumulated = run_training(
         tmp_path / "accumulated.json", batch_size=2, mixed_precision="bf16", gradient_accumulation_steps=2
     )
 
     loss_tolerance = 1e-3
+    assert large_batch["ranks"] == accumulated["ranks"] == [{"backend": "MULTI_GPU", "world_size": 2}] * 2
     assert len(large_batch["losses"]) == len(accumulated["losses"]) == 10
     torch.testing.assert_close(accumulated["losses"], large_batch["losses"], atol=loss_tolerance, rtol=0)
     torch.testing.assert_close(accumulated["final_loss"], large_batch["final_loss"], atol=loss_tolerance, rtol=0)
@@ -102,36 +105,31 @@ def test_training_with_gradient_accumulation(tmp_path):
     assert accumulated["final_loss"] < accumulated["losses"][0] - loss_tolerance
 
 
-def run_training(output, *, batch_size, mixed_precision="no", gradient_accumulation_steps=1, reference=False):
-    script = path_in_accelerate_package("test_utils", "scripts", "external_deps", "train_causal_lm.py")
-    command = [sys.executable]
-    if not reference:
-        command += [
-            "-m",
-            "accelerate.commands.launch",
-            "--config_file",
-            str(Path(__file__).with_name("ddp.yaml")),
-            "--main_process_port",
-            str(get_torch_dist_unique_port()),
-        ]
+@require_cuda
+@require_multi_gpu
+@require_huggingface_suite
+def test_checkpoint_resume(tmp_path):
+    """Fresh processes must resume the same examples, momentum and learning-rate schedule."""
+    options = dict(config_file=Path(__file__).with_name("ddp.yaml"))
+    expected_ranks = [{"backend": "MULTI_GPU", "world_size": 2}] * 2
 
-    command += [
-        str(script),
-        "--output",
-        str(output),
-        "--batch-size",
-        str(batch_size),
-        "--mixed-precision",
-        mixed_precision,
-        "--gradient-accumulation-steps",
-        str(gradient_accumulation_steps),
-    ]
-    if reference:
-        command.append("--reference")
+    options.update(script="resume_causal_lm.py", batch_size=2, gradient_accumulation_steps=2)
+    checkpoint = tmp_path / "checkpoint"
+    uninterrupted = run_training(tmp_path / "full.json", **options)
+    partial = run_training(
+        tmp_path / "partial.json", **options, script_args=["--checkpoint", checkpoint, "--save-at", "5"]
+    )
+    resumed = run_training(
+        tmp_path / "resumed.json", **options, script_args=["--checkpoint", checkpoint, "--resume-at", "5"]
+    )
 
-    result = execute_subprocess_async(command, env={**os.environ, "OMP_NUM_THREADS": "1"})
-    assert result.returncode == 0, result.stderr
-
-    result = json.loads(output.read_text(encoding="utf-8"))
-    assert result["world_size"] == (1 if reference else 2)
-    return result
+    assert uninterrupted["ranks"] == partial["ranks"] == resumed["ranks"] == expected_ranks
+    assert len(uninterrupted["losses"]) == 10
+    assert len(partial["losses"]) == len(resumed["losses"]) == 5
+    expected_ids = [list(range(start, start + 8)) for start in range(0, 80, 8)]
+    assert uninterrupted["sample_ids"] == expected_ids
+    assert partial["sample_ids"] + resumed["sample_ids"] == expected_ids
+    assert uninterrupted["learning_rates"] == pytest.approx([0.1 * 0.95**step for step in range(10)])
+    assert partial["learning_rates"] + resumed["learning_rates"] == uninterrupted["learning_rates"]
+    torch.testing.assert_close(partial["losses"] + resumed["losses"], uninterrupted["losses"], atol=1e-5, rtol=0)
+    torch.testing.assert_close(resumed["final_losses"], uninterrupted["final_losses"], atol=1e-5, rtol=0)

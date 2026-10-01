@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Train a tiny causal LM for the DDP training comparisons."""
+"""Train a tiny causal LM for distributed training comparisons."""
 
 import argparse
 import json
@@ -20,30 +20,11 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from accelerate import Accelerator
-from accelerate.utils import set_seed
-
-
-def register_mixed_precision_check(model, expected_dtype):
-    """Check that a Linear layer produces output in the requested mixed precision.
-
-    Training can succeed with similar losses even when mixed precision is
-    inactive. Check the output dtype to ensure it was actually used.
-    """
-
-    def check_output_dtype(module, inputs, output):
-        assert output.dtype == expected_dtype, f"Expected {expected_dtype} output, got {output.dtype}"
-
-    for module in model.modules():
-        if isinstance(module, torch.nn.Linear):
-            module.register_forward_hook(check_output_dtype)
-            return
-
-    raise ValueError("Expected a Linear layer to check mixed-precision output.")
+from accelerate.test_utils.causal_lm import load_model_and_data, observe_backend, register_mixed_precision_check
+from accelerate.utils import gather_object, set_seed
 
 
 def train_reference(model, optimizer, dataloader, mixed_precision_dtype, device):
@@ -110,15 +91,7 @@ def main():
     # Explicitly use full FP32 matmul precision for this comparison.
     torch.set_float32_matmul_precision("highest")
 
-    checkpoint = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    # Training does not reuse the attention cache used for generation.
-    model = AutoModelForCausalLM.from_pretrained(
-        checkpoint,
-        dtype=torch.float32,
-        use_cache=False,
-    )
-    model.train()
+    model, input_ids = load_model_and_data()
 
     mixed_precision_dtype = {
         "no": None,
@@ -128,14 +101,11 @@ def main():
     if mixed_precision_dtype is not None:
         register_mixed_precision_check(model, mixed_precision_dtype)
 
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train[:100]")
-    text = "\n\n".join(dataset["text"])
-    token_ids = tokenizer(text, return_attention_mask=False)["input_ids"]
-
-    block_size, num_blocks = 32, 80
-    # Each block has 31 next-token targets, so equally sized microbatch losses
-    # can be averaged without reweighting. Eight blocks per update give ten complete updates.
-    input_ids = torch.tensor(token_ids[: num_blocks * block_size]).reshape(num_blocks, block_size)
+    world_size = 1 if args.reference else accelerator.num_processes
+    if args.batch_size * world_size * args.gradient_accumulation_steps != 8:
+        raise ValueError("This fixture requires eight blocks per complete update.")
+    if args.reference and args.gradient_accumulation_steps != 1:
+        raise ValueError("The PyTorch reference does not implement accumulation.")
     dataloader = DataLoader(input_ids, batch_size=args.batch_size, shuffle=False)
 
     if args.reference:
@@ -159,8 +129,10 @@ def main():
     with torch.no_grad(), context:
         final_loss = model(input_ids=first_global_batch, labels=first_global_batch).loss.item()
 
+    ranks = [] if args.reference else gather_object([observe_backend(accelerator, model)])
     if args.reference or accelerator.is_main_process:
         results = {
+            "ranks": ranks,
             "losses": losses,
             "final_loss": final_loss,
             "world_size": 1 if args.reference else accelerator.num_processes,
