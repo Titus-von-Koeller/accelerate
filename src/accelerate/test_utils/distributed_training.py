@@ -26,14 +26,19 @@ def run_training(
     *,
     batch_size,
     config_file=None,
+    reference=False,
     mixed_precision="no",
     gradient_accumulation_steps=1,
     launch_args=(),
     script="train_causal_lm.py",
     script_args=(),
 ):
+    if not reference and config_file is None:
+        raise ValueError("Distributed training requires an explicit launch configuration.")
+    if reference and config_file is not None:
+        raise ValueError("The plain-PyTorch reference does not use a launch configuration.")
     command = [sys.executable]
-    if config_file is not None:
+    if not reference:
         command += [
             "-m",
             "accelerate.commands.launch",
@@ -57,7 +62,7 @@ def run_training(
         str(gradient_accumulation_steps),
         *map(str, script_args),
     ]
-    if config_file is None:
+    if reference:
         command.append("--reference")
 
     result = execute_subprocess_async(command, env={**os.environ, "OMP_NUM_THREADS": "1"})

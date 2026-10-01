@@ -34,7 +34,7 @@ def test_training(tmp_path):
     Compare DDP losses with single-GPU training on the same effective batches.
     A plain-PyTorch baseline can expose wrapper bugs that two Accelerate runs could share.
     """
-    reference = run_training(tmp_path / "reference.json", batch_size=8)
+    reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8)
     distributed = run_training(tmp_path / "ddp.json", config_file=Path(__file__).with_name("ddp.yaml"), batch_size=4)
 
     loss_tolerance = 1e-4
@@ -61,7 +61,9 @@ def test_training(tmp_path):
 @require_huggingface_suite
 def test_training_mixed_precision(tmp_path, mixed_precision, loss_tolerance):
     """Compare DDP with single-GPU training at the same requested precision."""
-    reference = run_training(tmp_path / "reference.json", batch_size=8, mixed_precision=mixed_precision)
+    reference = run_training(
+        tmp_path / "reference.json", reference=True, batch_size=8, mixed_precision=mixed_precision
+    )
     distributed = run_training(
         tmp_path / "ddp.json",
         config_file=Path(__file__).with_name("ddp.yaml"),
@@ -90,7 +92,11 @@ def test_training_with_gradient_accumulation(tmp_path):
         tmp_path / "large.json", config_file=Path(__file__).with_name("ddp.yaml"), batch_size=4, mixed_precision="bf16"
     )
     accumulated = run_training(
-        tmp_path / "accumulated.json", batch_size=2, mixed_precision="bf16", gradient_accumulation_steps=2
+        tmp_path / "accumulated.json",
+        config_file=Path(__file__).with_name("ddp.yaml"),
+        batch_size=2,
+        mixed_precision="bf16",
+        gradient_accumulation_steps=2,
     )
 
     loss_tolerance = 1e-3

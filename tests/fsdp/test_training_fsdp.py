@@ -47,7 +47,7 @@ def test_training(tmp_path, version):
     options = dict(config_file=Path(__file__).with_name(f"fsdp{version}.yaml"), batch_size=4)
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": version}] * 2
 
-    reference = run_training(tmp_path / "reference.json", batch_size=8)
+    reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8)
     trained = run_training(tmp_path / "trained.json", **options)
 
     assert trained["ranks"] == expected_ranks
