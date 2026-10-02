@@ -112,3 +112,33 @@ def test_training_with_gradient_accumulation(tmp_path):
     # Agreement alone also accepts two runs that never learn. Require progress on the first batch.
     assert large_batch["final_loss"] < large_batch["losses"][0] - min_loss_decrease
     assert accumulated["final_loss"] < accumulated["losses"][0] - min_loss_decrease
+
+
+@require_cuda
+@require_multi_gpu
+@require_huggingface_suite
+def test_checkpoint_resume(tmp_path):
+    """Fresh processes must resume the same examples, momentum and learning-rate schedule."""
+    options = dict(config_file=DDP_CONFIG_FILE)
+    expected_ranks = [{"backend": "MULTI_GPU", "world_size": 2}] * 2
+
+    options.update(script="resume_causal_lm.py", batch_size=2, gradient_accumulation_steps=2)
+    checkpoint = tmp_path / "checkpoint"
+    uninterrupted = run_training(tmp_path / "full.json", **options)
+    partial = run_training(
+        tmp_path / "partial.json", **options, script_args=["--checkpoint", checkpoint, "--save-at", "5"]
+    )
+    resumed = run_training(
+        tmp_path / "resumed.json", **options, script_args=["--checkpoint", checkpoint, "--resume-at", "5"]
+    )
+
+    assert uninterrupted["ranks"] == partial["ranks"] == resumed["ranks"] == expected_ranks
+    assert len(uninterrupted["losses"]) == 10
+    assert len(partial["losses"]) == len(resumed["losses"]) == 5
+    expected_ids = [list(range(start, start + 8)) for start in range(0, 80, 8)]
+    assert uninterrupted["sample_ids"] == expected_ids
+    assert partial["sample_ids"] + resumed["sample_ids"] == expected_ids
+    assert uninterrupted["learning_rates"] == pytest.approx([0.1 * 0.95**step for step in range(10)])
+    assert partial["learning_rates"] + resumed["learning_rates"] == uninterrupted["learning_rates"]
+    torch.testing.assert_close(partial["losses"] + resumed["losses"], uninterrupted["losses"], atol=1e-5, rtol=0)
+    torch.testing.assert_close(resumed["final_losses"], uninterrupted["final_losses"], atol=1e-5, rtol=0)

@@ -29,6 +29,9 @@ def run_training(
     reference=False,
     mixed_precision="no",
     gradient_accumulation_steps=1,
+    launch_args=(),
+    script="train_causal_lm.py",
+    script_args=(),
 ):
     if not reference and config_file is None:
         raise ValueError("Distributed training requires an explicit launch configuration.")
@@ -45,9 +48,10 @@ def run_training(
             mixed_precision,
             "--main_process_port",
             str(get_torch_dist_unique_port()),
+            *map(str, launch_args),
         ]
     command += [
-        str(path_in_accelerate_package("test_utils", "scripts", "external_deps", "train_causal_lm.py")),
+        str(path_in_accelerate_package("test_utils", "scripts", "external_deps", script)),
         "--output",
         str(output),
         "--batch-size",
@@ -56,6 +60,7 @@ def run_training(
         mixed_precision,
         "--gradient-accumulation-steps",
         str(gradient_accumulation_steps),
+        *map(str, script_args),
     ]
     if reference:
         command.append("--reference")
