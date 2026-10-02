@@ -410,19 +410,34 @@ def load_fsdp_optimizer(
                     else Path(input_dir)
                 )
                 logger.info(f"Loading Optimizer from {ckpt_dir}")
-                if fsdp_plugin.fsdp_version == 2:
-                    from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict
+                if fsdp_plugin.fsdp_version == 1 and fsdp_plugin.state_dict_type == StateDictType.SHARDED_STATE_DICT:
+                    from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
 
-                    optim_state = get_optimizer_state_dict(model, optimizer, options=sd_options)
+                    # The optimizer loader needs tensor layout, while module extra state may be any object.
+                    model_state_dict = {
+                        key: value for key, value in model.state_dict().items() if isinstance(value, torch.Tensor)
+                    }
+                    optim_state = load_sharded_optimizer_state_dict(
+                        model_state_dict=model_state_dict,
+                        optimizer_key="optimizer",
+                        storage_reader=dist_cp.FileSystemReader(ckpt_dir),
+                    )["optimizer"]
+                    # DCP omits empty dictionaries, but FSDP requires an explicit state key.
+                    optim_state.setdefault("state", {})
                 else:
-                    optim_state = FSDP.optim_state_dict(model, optimizer)
-                optim_state = {"optimizer": optim_state}
-                dist_cp.load(
-                    state_dict=optim_state,
-                    storage_reader=dist_cp.FileSystemReader(ckpt_dir),
-                    planner=DefaultLoadPlanner(),
-                )
-                optim_state = optim_state["optimizer"]
+                    if fsdp_plugin.fsdp_version == 2:
+                        from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict
+
+                        optim_state = get_optimizer_state_dict(model, optimizer, options=sd_options)
+                    else:
+                        optim_state = FSDP.optim_state_dict(model, optimizer)
+                    optim_state = {"optimizer": optim_state}
+                    dist_cp.load(
+                        state_dict=optim_state,
+                        storage_reader=dist_cp.FileSystemReader(ckpt_dir),
+                        planner=DefaultLoadPlanner(),
+                    )
+                    optim_state = optim_state["optimizer"]
                 logger.info(f"Optimizer loaded from {ckpt_dir}")
             else:
                 optimizer_name = f"{OPTIMIZER_NAME}_{optimizer_index}_rank{accelerator.process_index}.bin"
