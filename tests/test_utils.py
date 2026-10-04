@@ -11,11 +11,14 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import os
 import pickle
 import signal
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 from collections import UserDict, namedtuple
@@ -24,6 +27,7 @@ from typing import NamedTuple, Optional
 from unittest.mock import Mock, patch
 
 import numpy as np
+import psutil
 import pytest
 import torch
 from torch import nn
@@ -75,16 +79,121 @@ if is_torch_xla_available():
 ExampleNamedTuple = namedtuple("ExampleNamedTuple", "a b c")
 
 
+@pytest.fixture
+def subprocess_pids(tmp_path):
+    pid_file = tmp_path / "pids.json"
+    yield pid_file
+    # Also clean up when a regression prevents the helper from stopping its children.
+    if pid_file.exists():
+        for pid in json.loads(pid_file.read_text()):
+            try:
+                process = psutil.Process(pid)
+                process.kill()
+                process.wait(timeout=2)
+            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
+                pass
+
+
+def assert_subprocesses_stopped(pid_file):
+    for pid in json.loads(pid_file.read_text()):
+        try:
+            process = psutil.Process(pid)
+            assert not process.is_running() or process.status() == psutil.STATUS_ZOMBIE
+        except psutil.NoSuchProcess:
+            pass
+
+
 class TestExecuteSubprocessAsync:
     @pytest.mark.skipif(os.name != "posix", reason="POSIX signal exit codes")
     def test_signal_exit_raises(self):
+        command = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
+        with pytest.raises(RuntimeError, match=f"returncode {-signal.SIGTERM}"):
+            execute_subprocess_async(command, echo=False)
+
+    def test_drains_both_output_streams(self):
         command = [
             sys.executable,
             "-c",
-            "import os, signal; os.kill(os.getpid(), signal.SIGTERM)",
+            "import sys\nfor _ in range(1000):\n    print('out' * 100)\n    print('err' * 100, file=sys.stderr)\n",
         ]
-        with pytest.raises(RuntimeError, match=f"returncode {-signal.SIGTERM}"):
-            execute_subprocess_async(command, echo=False)
+        result = execute_subprocess_async(command, timeout=5, quiet=True, echo=False)
+        assert result.stdout == ["out" * 100] * 1000
+        assert result.stderr == ["err" * 100] * 1000
+
+    @pytest.mark.parametrize("close_output", [False, True], ids=["open-pipes", "closed-pipes"])
+    def test_timeout_stops_child(self, subprocess_pids, close_output):
+        code = (
+            "import json, os, sys, time; from pathlib import Path; "
+            f"Path({str(subprocess_pids)!r}).write_text(json.dumps([os.getpid()])); "
+            "print('started', flush=True); print('diagnostic', file=sys.stderr, flush=True); "
+        )
+        if close_output:
+            code += "os.close(1); os.close(2); "
+        code += "time.sleep(5)"
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="timed out") as error:
+            execute_subprocess_async([sys.executable, "-c", code], timeout=1, quiet=True, echo=False)
+        assert time.monotonic() - started < 4
+        assert "started" in str(error.value)
+        assert "diagnostic" in str(error.value)
+        assert_subprocesses_stopped(subprocess_pids)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup")
+    def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pids):
+        code = (
+            "import json, subprocess, sys; from pathlib import Path; "
+            "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+            f"Path({str(subprocess_pids)!r}).write_text(json.dumps([worker.pid]))"
+        )
+        started = time.monotonic()
+        with pytest.raises(TimeoutError, match="timed out"):
+            execute_subprocess_async([sys.executable, "-c", code], timeout=1, quiet=True, echo=False)
+        # A worker that finishes its sleep naturally must not count as successful cleanup.
+        assert time.monotonic() - started < 4
+        assert_subprocesses_stopped(subprocess_pids)
+
+    def test_reader_failure_stops_child(self, subprocess_pids):
+        code = (
+            "import json, os, time; from pathlib import Path; "
+            f"Path({str(subprocess_pids)!r}).write_text(json.dumps([os.getpid()])); "
+            "os.write(1, bytes([255, 10])); time.sleep(5)"
+        )
+        started = time.monotonic()
+        with pytest.raises(UnicodeDecodeError):
+            execute_subprocess_async([sys.executable, "-c", code], timeout=2, quiet=True, echo=False)
+        assert time.monotonic() - started < 4
+        assert_subprocesses_stopped(subprocess_pids)
+
+    @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT behavior")
+    def test_keyboard_interrupt_stops_child(self, subprocess_pids):
+        child = (
+            "import json, os, time; from pathlib import Path; "
+            f"Path({str(subprocess_pids)!r}).write_text(json.dumps([os.getpid()])); time.sleep(5)"
+        )
+        code = (
+            "import sys\nfrom accelerate.test_utils.testing import execute_subprocess_async\n"
+            "try:\n"
+            f"    execute_subprocess_async([sys.executable, '-c', {child!r}], echo=False)\n"
+            "except KeyboardInterrupt:\n    print('interrupted')\n"
+        )
+        supervisor = subprocess.Popen(
+            [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+        )
+        try:
+            for _ in range(500):
+                if subprocess_pids.exists():
+                    break
+                time.sleep(0.01)
+            assert subprocess_pids.exists(), "Child did not start"
+            supervisor.send_signal(signal.SIGINT)
+            stdout, stderr = supervisor.communicate(timeout=4)
+            assert supervisor.returncode == 0, stderr.decode()
+            assert b"interrupted" in stdout
+            assert_subprocesses_stopped(subprocess_pids)
+        finally:
+            if supervisor.poll() is None:
+                supervisor.kill()
+            supervisor.communicate(timeout=5)
 
 
 class UtilsTester(unittest.TestCase):
