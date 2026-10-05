@@ -34,6 +34,8 @@ def run_training(
     reference=False,
     mixed_precision="no",
     gradient_accumulation_steps=1,
+    script="train_causal_lm.py",
+    script_args=(),
 ):
     """Run a training worker and return its measurements; the caller checks the results."""
     # Require an explicit setup instead of using the machine's default launch configuration.
@@ -50,7 +52,7 @@ def run_training(
             main_process_port=get_torch_dist_unique_port(),
         )
     command += [
-        path_in_accelerate_package("test_utils", "scripts", "external_deps", "train_causal_lm.py"),
+        path_in_accelerate_package("test_utils", "scripts", "external_deps", script),
         "--output",
         output,
         "--batch-size",
@@ -59,6 +61,7 @@ def run_training(
         mixed_precision,
         "--gradient-accumulation-steps",
         str(gradient_accumulation_steps),
+        *map(str, script_args),
     ]
     if reference:
         command.append("--reference")

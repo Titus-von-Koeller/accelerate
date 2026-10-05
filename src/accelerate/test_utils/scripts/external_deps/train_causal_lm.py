@@ -20,11 +20,10 @@ from contextlib import nullcontext
 from pathlib import Path
 
 import torch
-from datasets import load_dataset
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from accelerate import Accelerator
+from accelerate.test_utils.causal_lm import load_model_and_data
 from accelerate.utils import set_seed
 
 
@@ -112,15 +111,7 @@ def main():
     # Explicitly use full FP32 matmul precision for this comparison.
     torch.set_float32_matmul_precision("highest")
 
-    checkpoint = "trl-internal-testing/tiny-Qwen2ForCausalLM-2.5"
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint)
-    # Training does not reuse the attention cache used for generation.
-    model = AutoModelForCausalLM.from_pretrained(
-        checkpoint,
-        dtype=torch.float32,
-        use_cache=False,
-    )
-    model.train()
+    model, input_ids = load_model_and_data()
 
     mixed_precision_dtype = {
         "no": None,
@@ -130,14 +121,6 @@ def main():
     if mixed_precision_dtype is not None:
         register_mixed_precision_check(model, mixed_precision_dtype)
 
-    dataset = load_dataset("Salesforce/wikitext", "wikitext-2-raw-v1", split="train[:100]")
-    text = "\n\n".join(dataset["text"])
-    token_ids = tokenizer(text, return_attention_mask=False)["input_ids"]
-
-    block_size, num_blocks = 32, 80
-    # Each block has 31 next-token targets, so equally sized microbatch losses
-    # can be averaged without reweighting. Eight blocks per update give ten complete updates.
-    input_ids = torch.tensor(token_ids[: num_blocks * block_size]).reshape(num_blocks, block_size)
     dataloader = DataLoader(input_ids, batch_size=args.batch_size, shuffle=False)
 
     if args.reference:

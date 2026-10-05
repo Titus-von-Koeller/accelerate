@@ -148,6 +148,65 @@ def test_training_with_gradient_accumulation(tmp_path):
     assert accumulated["final_loss"] < accumulated["losses"][0] - min_loss_decrease
 
 
+@require_cuda
+@require_multi_gpu
+@require_huggingface_suite
+def test_checkpoint_resume(tmp_path):
+    """Does restarting from a checkpoint reproduce uninterrupted training?
+
+    Save after five updates, exit, and load in fresh processes for the remaining five.
+    Compare the examples, learning rates and losses; momentum makes weights alone insufficient.
+    """
+    checkpoint = tmp_path / "checkpoint"
+    uninterrupted = run_training(
+        tmp_path / "uninterrupted.json",
+        config_file=DDP_CONFIG_FILE,
+        batch_size=2,
+        mixed_precision="no",
+        gradient_accumulation_steps=2,
+        script="resume_causal_lm.py",
+    )
+    partial = run_training(
+        tmp_path / "partial.json",
+        config_file=DDP_CONFIG_FILE,
+        batch_size=2,
+        mixed_precision="no",
+        gradient_accumulation_steps=2,
+        script="resume_causal_lm.py",
+        script_args=["--checkpoint", checkpoint, "--save-at", "5"],
+    )
+    resumed = run_training(
+        tmp_path / "resumed.json",
+        config_file=DDP_CONFIG_FILE,
+        batch_size=2,
+        mixed_precision="no",
+        gradient_accumulation_steps=2,
+        script="resume_causal_lm.py",
+        script_args=["--checkpoint", checkpoint, "--resume-at", "5"],
+    )
+
+    # Did both runs process the same examples, without repeating or missing an update?
+    assert uninterrupted["world_size"] == partial["world_size"] == resumed["world_size"] == 2
+    assert len(uninterrupted["losses"]) == 10
+    assert len(partial["losses"]) == len(resumed["losses"]) == 5
+    expected_ids = [list(range(start, start + 8)) for start in range(0, 80, 8)]
+    assert uninterrupted["sample_ids"] == expected_ids
+    assert partial["sample_ids"] + resumed["sample_ids"] == expected_ids
+
+    # Did the learning-rate schedule continue from the saved point?
+    expected_learning_rates = [0.1 * 0.95**step for step in range(10)]
+    assert uninterrupted["learning_rates"] == pytest.approx(expected_learning_rates)
+    assert partial["learning_rates"] + resumed["learning_rates"] == uninterrupted["learning_rates"]
+
+    # Did subsequent updates match? The first resumed loss alone cannot reveal lost momentum.
+    max_loss_difference = 1e-5
+    assert_close(partial["losses"] + resumed["losses"], uninterrupted["losses"], atol=max_loss_difference, rtol=0)
+    assert_close(resumed["final_loss"], uninterrupted["final_loss"], atol=max_loss_difference, rtol=0)
+
+    min_loss_decrease = 1e-4
+    assert uninterrupted["final_loss"] < uninterrupted["losses"][0] - min_loss_decrease
+
+
 @require_huggingface_suite
 @pytest.mark.skipif(
     not (torch.distributed.is_available() and torch.distributed.is_gloo_available()), reason="Requires Gloo"
