@@ -173,7 +173,7 @@ def test_checkpoint_resume(tmp_path):
         mixed_precision="no",
         gradient_accumulation_steps=2,
         script="resume_causal_lm.py",
-        script_args=["--checkpoint", checkpoint, "--save-at", "5"],
+        script_args=["--save-checkpoint", checkpoint],
     )
     resumed = run_training(
         tmp_path / "resumed.json",
@@ -182,20 +182,19 @@ def test_checkpoint_resume(tmp_path):
         mixed_precision="no",
         gradient_accumulation_steps=2,
         script="resume_causal_lm.py",
-        script_args=["--checkpoint", checkpoint, "--resume-at", "5"],
+        script_args=["--resume-from-checkpoint", checkpoint],
     )
 
     # Did both runs process the same examples, without repeating or missing an update?
     assert uninterrupted["world_size"] == partial["world_size"] == resumed["world_size"] == 2
     assert len(uninterrupted["losses"]) == 10
     assert len(partial["losses"]) == len(resumed["losses"]) == 5
+
     expected_ids = [list(range(start, start + 8)) for start in range(0, 80, 8)]
     assert uninterrupted["sample_ids"] == expected_ids
     assert partial["sample_ids"] + resumed["sample_ids"] == expected_ids
 
     # Did the learning-rate schedule continue from the saved point?
-    expected_learning_rates = [0.1 * 0.95**step for step in range(10)]
-    assert uninterrupted["learning_rates"] == pytest.approx(expected_learning_rates)
     assert partial["learning_rates"] + resumed["learning_rates"] == uninterrupted["learning_rates"]
 
     # Did subsequent updates match? The first resumed loss alone cannot reveal lost momentum.

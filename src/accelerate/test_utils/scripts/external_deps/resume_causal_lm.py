@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Save or resume FP32 training at an optimizer-update boundary."""
+"""Compare uninterrupted FP32 training with saving and restarting after five updates."""
 
 import argparse
 import json
@@ -26,80 +26,86 @@ from accelerate.test_utils.causal_lm import load_model_and_data
 from accelerate.utils import set_seed
 
 
-def main():
+def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=2)
     parser.add_argument("--mixed-precision", choices=("no",), default="no")
-    parser.add_argument("--checkpoint", type=Path)
-    parser.add_argument("--save-at", type=int)
-    parser.add_argument("--resume-at", type=int, default=0)
-    args = parser.parse_args()
-    if args.save_at is not None and args.resume_at:
-        parser.error("Save and resume are separate fresh-process runs.")
-    if (args.save_at is not None or args.resume_at) and args.checkpoint is None:
-        parser.error("Save and resume require a checkpoint directory.")
-    if args.save_at is not None and not 0 < args.save_at < 10:
-        parser.error("The save point must be between updates 1 and 9.")
-    if not 0 <= args.resume_at < 10:
-        parser.error("The resume point must be between updates 0 and 9.")
 
-    # The scheduler advances once per completed global update, independently of world size.
+    checkpoint_args = parser.add_mutually_exclusive_group()
+    checkpoint_args.add_argument("--save-checkpoint", type=Path)
+    checkpoint_args.add_argument("--resume-from-checkpoint", type=Path)
+
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
     accelerator = Accelerator(
-        mixed_precision="no",
+        mixed_precision=args.mixed_precision,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
-        step_scheduler_with_optimizer=False,
     )
     if args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps != 8:
         raise ValueError("This fixture requires eight blocks per complete update.")
+
     set_seed(1337)
+    # Use full FP32 matrix multiplication precision for the loss comparison.
     torch.set_float32_matmul_precision("highest")
+
     model, input_ids = load_model_and_data()
     dataset = TensorDataset(input_ids, torch.arange(len(input_ids)))
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
 
     # Momentum makes loading model weights alone insufficient for correct continuation.
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1, momentum=0.9)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.95)
+
+    # Future learning rates depend on restoring the scheduler's position, not just the optimizer's rate.
+    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4)
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
-    if args.resume_at:
-        accelerator.load_state(args.checkpoint)
-        # The saved point counts global updates; the prepared loader yields local microbatches.
-        dataloader = accelerator.skip_first_batches(dataloader, args.resume_at * args.gradient_accumulation_steps)
+
+    checkpoint_update = 5
+    if args.resume_from_checkpoint:
+        accelerator.load_state(args.resume_from_checkpoint)
+        # Each saved update consumed this many local microbatches.
+        resume_batch = checkpoint_update * args.gradient_accumulation_steps
+        dataloader = accelerator.skip_first_batches(dataloader, resume_batch)
 
     losses, learning_rates, sample_ids = [], [], []
     window_losses, window_ids = [], []
-    for batch, ids in dataloader:
+
+    for batch, batch_sample_ids in dataloader:
         with accelerator.accumulate(model):
             learning_rate = optimizer.param_groups[0]["lr"]
             loss = model(input_ids=batch, labels=batch).loss
             accelerator.backward(loss)
             optimizer.step()
+            scheduler.step()
             optimizer.zero_grad()
 
             window_losses.append(loss.detach())
-            window_ids.append(ids)
+            window_ids.append(batch_sample_ids)
             if accelerator.sync_gradients:
                 window_loss = torch.stack(window_losses).mean()
                 losses.append(accelerator.reduce(window_loss, reduction="mean").item())
                 learning_rates.append(learning_rate)
                 sample_ids.append(sorted(accelerator.gather(torch.cat(window_ids)).cpu().tolist()))
-                scheduler.step()
                 window_losses.clear()
                 window_ids.clear()
-        if args.save_at is not None and len(losses) == args.save_at:
-            accelerator.save_state(args.checkpoint)
-            break
+
+                if args.save_checkpoint and len(losses) == checkpoint_update:
+                    accelerator.save_state(args.save_checkpoint)
+                    break
 
     # Both processes revisit the first global batch, as in the ordinary training comparison.
     first_global_batch = input_ids[:8].to(accelerator.device)
     with torch.no_grad():
-        final_loss = model(input_ids=first_global_batch, labels=first_global_batch).loss.detach()
+        final_loss = model(input_ids=first_global_batch, labels=first_global_batch).loss.item()
+
     if accelerator.is_main_process:
         result = {
             "losses": losses,
-            "final_loss": final_loss.item(),
+            "final_loss": final_loss,
             "learning_rates": learning_rates,
             "sample_ids": sample_ids,
             "world_size": accelerator.num_processes,
