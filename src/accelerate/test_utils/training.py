@@ -173,3 +173,21 @@ def load_causal_lm_and_data():
     # can be averaged without reweighting. Eight blocks per update give ten complete updates.
     input_ids = torch.tensor(token_ids[: num_blocks * block_size]).reshape(num_blocks, block_size)
     return model, input_ids
+
+
+def observe_backend(accelerator, model):
+    """Report the prepared model's backend variant, rather than its requested config."""
+    observation = {"backend": accelerator.distributed_type.value, "world_size": accelerator.num_processes}
+    if accelerator.distributed_type == DistributedType.FSDP:
+        from torch.distributed.fsdp import FullyShardedDataParallel
+
+        if isinstance(model, FullyShardedDataParallel):
+            observation["fsdp_version"] = 1
+        else:
+            from torch.distributed.fsdp import FSDPModule
+
+            assert isinstance(model, FSDPModule)
+            observation["fsdp_version"] = 2
+    elif accelerator.distributed_type == DistributedType.MULTI_GPU:
+        assert isinstance(model, torch.nn.parallel.DistributedDataParallel)
+    return observation

@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Train a tiny causal LM for the DDP training comparisons."""
+"""Train a tiny causal LM for distributed training comparisons."""
 
 import argparse
 import json
@@ -23,8 +23,8 @@ import torch
 from torch.utils.data import DataLoader
 
 from accelerate import Accelerator
-from accelerate.test_utils.training import load_causal_lm_and_data
-from accelerate.utils import set_seed
+from accelerate.test_utils.training import load_causal_lm_and_data, observe_backend
+from accelerate.utils import gather_object, set_seed
 
 
 def register_mixed_precision_check(model, expected_dtype):
@@ -128,13 +128,15 @@ def main():
         model.to(device)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
 
+    ranks = []
     if args.reference:
         losses = train_reference(model, optimizer, dataloader, mixed_precision_dtype, device)
     else:
         model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+        ranks = gather_object([observe_backend(accelerator, model)])
         losses = train_with_accelerate(model, optimizer, dataloader, accelerator)
 
-    # In DDP, both processes revisit the same first eight examples after the final update.
+    # Both processes revisit the same first eight examples after the final update.
     # This measures progress on training data, not performance on unseen text.
     first_global_batch = input_ids[:8].to(device)
     # Accelerate's prepared model handles autocast inside forward; only the reference needs it here.
@@ -148,6 +150,7 @@ def main():
 
     if args.reference or accelerator.is_main_process:
         results = {
+            "ranks": ranks,
             "losses": losses,
             "final_loss": final_loss,
             "world_size": 1 if args.reference else accelerator.num_processes,
