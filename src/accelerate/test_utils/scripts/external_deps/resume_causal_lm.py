@@ -22,8 +22,8 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset
 
 from accelerate import Accelerator
-from accelerate.test_utils.training import load_causal_lm_and_data
-from accelerate.utils import set_seed
+from accelerate.test_utils.training import load_causal_lm_and_data, observe_backend
+from accelerate.utils import gather_object, set_seed
 
 
 def parse_args():
@@ -65,6 +65,8 @@ def main():
     # Restoring the current learning rate alone does not restore when the next reduction is due.
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=4)
     model, optimizer, dataloader, scheduler = accelerator.prepare(model, optimizer, dataloader, scheduler)
+
+    ranks = gather_object([observe_backend(accelerator, model)])
 
     checkpoint_update = 5
     if args.resume_from_checkpoint:
@@ -108,6 +110,7 @@ def main():
 
     if accelerator.is_main_process:
         result = {
+            "ranks": ranks,
             "losses": losses,
             "final_loss": final_loss,
             "learning_rates": learning_rates,
