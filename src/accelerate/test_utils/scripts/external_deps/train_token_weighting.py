@@ -19,22 +19,18 @@ import copy
 import importlib.util
 import os
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import parameters_to_vector
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM
+from transformers import AutoModelForCausalLM, get_constant_schedule, set_seed
+
+from accelerate import Accelerator
 
 
 def run_example(example_file, model, samples, *, learning_rate, batch_size, gradient_accumulation_steps):
     """Run the real example and record its target counts, gradients and updated parameters."""
-
-    def get_dataloaders(accelerator, batch_size):
-        return DataLoader(samples, batch_size=batch_size), DataLoader(samples, batch_size=2)
-
     spec = importlib.util.spec_from_file_location("autoregressive_example", example_file)
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
@@ -51,36 +47,27 @@ def run_example(example_file, model, samples, *, learning_rate, batch_size, grad
 
     target_count_hook = model.register_forward_pre_hook(observe_batch, with_kwargs=True)
 
-    original_adamw = example.AdamW
-
-    def make_optimizer(*args, **kwargs):
-        optimizer = original_adamw(*args, **kwargs)
-        optimizer.register_step_pre_hook(observe_gradients)
-        return optimizer
-
-    # Leave gradients unclipped, matching the full-batch reference.
-    config = {
-        "lr": learning_rate,
-        "num_epochs": 1,
-        "seed": 1337,
-        "batch_size": batch_size,
-        "max_grad_norm": float("inf"),
-    }
-    training_args = SimpleNamespace(
-        cpu=True,
-        mixed_precision="no",
-        gradient_accumulation_steps=gradient_accumulation_steps,
-        with_wandb_tracking=False,
-    )
-    # Keep the actual example's prepare/gather/no_sync/backward/optimizer loop.
-    # Controlled target counts make normalization errors measurable.
+    accelerator = Accelerator(cpu=True, mixed_precision="no", gradient_accumulation_steps=gradient_accumulation_steps)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     # Observe gradients before AdamW, whose adaptive update can hide a scaling error.
-    with (
-        patch.object(example, "get_dataloaders", get_dataloaders),
-        patch.object(example.AutoModelForCausalLM, "from_pretrained", return_value=model),
-        patch.object(example, "AdamW", make_optimizer),
-    ):
-        example.training_function(config, training_args)
+    optimizer.register_step_pre_hook(observe_gradients)
+    lr_scheduler = get_constant_schedule(optimizer)
+    train_dataloader = DataLoader(samples, batch_size=batch_size)
+    eval_dataloader = DataLoader(samples, batch_size=2)
+
+    set_seed(1337)
+    example.train(
+        accelerator,
+        model,
+        optimizer,
+        train_dataloader,
+        eval_dataloader,
+        lr_scheduler,
+        num_epochs=1,
+        # Leave gradients unclipped, matching the full-batch reference.
+        max_grad_norm=float("inf"),
+    )
+    accelerator.end_training()
     target_count_hook.remove()
 
     return {
