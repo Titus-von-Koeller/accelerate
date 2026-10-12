@@ -99,7 +99,7 @@ def main():
         input_ids[row, length:] = 0
         labels[row, length:] = -100
         attention_mask[row, length:] = 0
-    # Target counting must honor ignored labels, not just the attention mask.
+    # Ignore a non-padding target so counting attention-mask entries gives the wrong denominator.
     labels[2, 3] = -100
 
     samples = [
