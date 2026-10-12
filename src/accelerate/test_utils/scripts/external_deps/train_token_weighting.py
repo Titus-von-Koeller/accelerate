@@ -38,19 +38,20 @@ def run_example(example_file, model, samples, *, learning_rate, batch_size, grad
     target_counts = []
     gradients = []
 
-    def observe_batch(module, args, kwargs):
+    def record_target_count(module, args, kwargs):
+        # Evaluation forwards must not count as training microbatches.
         if module.training:
             target_counts.append(kwargs["labels"][:, 1:].ne(-100).sum().item())
 
-    def observe_gradients(optimizer, args, kwargs):
+    def record_gradients(optimizer, args, kwargs):
         gradients.append(torch.cat([parameter.grad.detach().flatten() for parameter in model.parameters()]))
 
-    target_count_hook = model.register_forward_pre_hook(observe_batch, with_kwargs=True)
+    target_count_hook = model.register_forward_pre_hook(record_target_count, with_kwargs=True)
 
     accelerator = Accelerator(cpu=True, mixed_precision="no", gradient_accumulation_steps=gradient_accumulation_steps)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     # Observe gradients before AdamW, whose adaptive update can hide a scaling error.
-    optimizer.register_step_pre_hook(observe_gradients)
+    optimizer.register_step_pre_hook(record_gradients)
     lr_scheduler = get_constant_schedule(optimizer)
     train_dataloader = DataLoader(samples, batch_size=batch_size)
     eval_dataloader = DataLoader(samples, batch_size=2)
@@ -92,11 +93,13 @@ def main():
     input_ids = torch.randint(1, model.config.vocab_size, (8, 8), generator=torch.Generator().manual_seed(1337))
     labels = input_ids.clone()
     attention_mask = torch.ones_like(input_ids)
+    # Unequal target counts distinguish token weighting from averaging microbatch means.
     for row, length in enumerate([2, 3, 7, 8, 4, 5, 2, 6]):
         input_ids[row, length:] = 0
         labels[row, length:] = -100
         attention_mask[row, length:] = 0
-    labels[2, 3] = -100  # Also ignore one non-padding target.
+    # Target counting must honor ignored labels, not just the attention mask.
+    labels[2, 3] = -100
 
     samples = [
         dict(input_ids=ids, labels=targets, attention_mask=mask)
