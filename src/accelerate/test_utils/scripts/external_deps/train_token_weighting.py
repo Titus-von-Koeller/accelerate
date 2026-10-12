@@ -31,6 +31,7 @@ from accelerate import Accelerator
 
 def run_example(example_file, model, samples, *, learning_rate, batch_size, gradient_accumulation_steps):
     """Run the real example and record its target counts, gradients and updated parameters."""
+    # Load the selected example by path so we can call its training function.
     spec = importlib.util.spec_from_file_location("autoregressive_example", example_file)
     example = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(example)
@@ -90,10 +91,10 @@ def main():
     )
     model.train()
 
+    # Prepare inputs with unequal target counts to expose incorrect microbatch averaging.
     input_ids = torch.randint(1, model.config.vocab_size, (8, 8), generator=torch.Generator().manual_seed(1337))
     labels = input_ids.clone()
     attention_mask = torch.ones_like(input_ids)
-    # Unequal target counts distinguish token weighting from averaging microbatch means.
     for row, length in enumerate([2, 3, 7, 8, 4, 5, 2, 6]):
         input_ids[row, length:] = 0
         labels[row, length:] = -100
@@ -108,8 +109,8 @@ def main():
 
     initial_parameters = parameters_to_vector(model.parameters()).detach()
 
-    # Independent oracle: one ordinary PyTorch update on the full batch. Compute
-    # the shifted mean loss explicitly, not through the example's token scaling.
+    # Calculate an independent full-batch reference using ordinary PyTorch.
+    # Compute the shifted mean loss explicitly, not through the example's token scaling.
     reference_model = copy.deepcopy(model)
     learning_rate = 0.01
     reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
@@ -124,6 +125,7 @@ def main():
     reference_optimizer.step()
     reference_parameters = parameters_to_vector(reference_model.parameters()).detach()
 
+    # Run the example and record its gradients and update.
     observations = run_example(
         args.example,
         model,
