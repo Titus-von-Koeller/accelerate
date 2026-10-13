@@ -99,7 +99,8 @@ def main():
         input_ids[row, length:] = 0
         labels[row, length:] = -100
         attention_mask[row, length:] = 0
-    # Ignore a non-padding target so counting attention-mask entries gives the wrong denominator.
+    # Keep this token as context, but exclude its prediction from the loss.
+    # Counting targets from the attention mask would incorrectly include it.
     labels[2, 3] = -100
 
     samples = [
@@ -109,8 +110,7 @@ def main():
 
     initial_parameters = parameters_to_vector(model.parameters()).detach()
 
-    # Calculate an independent full-batch reference using ordinary PyTorch.
-    # Compute the shifted mean loss explicitly, not through the example's token scaling.
+    # Compute the full-batch mean independently so a scaling bug cannot affect both paths.
     reference_model = copy.deepcopy(model)
     learning_rate = 0.01
     reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
