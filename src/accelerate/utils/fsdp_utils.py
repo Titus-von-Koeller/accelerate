@@ -371,6 +371,60 @@ def save_fsdp_optimizer(fsdp_plugin, accelerator, optimizer, model, output_dir, 
                 logger.info(f"Optimizer state saved in {output_optimizer_file}")
 
 
+def _load_fsdp1_optimizer_state_dict(checkpoint_dir, device, model_state_dict):
+    """Create sharded destinations from the saved optimizer, without initializing it."""
+    import torch.distributed.checkpoint as dist_cp
+    from torch.distributed._shard import sharded_tensor
+    from torch.distributed._shard.sharding_spec import ChunkShardingSpec
+    from torch.distributed.checkpoint._nested_dict import unflatten_state_dict
+    from torch.distributed.checkpoint.metadata import BytesStorageMetadata
+
+    reader = dist_cp.FileSystemReader(checkpoint_dir)
+    metadata = reader.read_metadata()
+    state_dict = {}
+    for key, value in metadata.state_dict_metadata.items():
+        key_path = metadata.planner_data[key]
+        if key_path[0] != "optimizer":
+            continue
+        if isinstance(value, BytesStorageMetadata):
+            state_dict[key] = None
+            continue
+        tensor_options = dict(
+            dtype=value.properties.dtype,
+            layout=value.properties.layout,
+            requires_grad=value.properties.requires_grad,
+            pin_memory=value.properties.pin_memory,
+        )
+        if value.size.numel() == 1:
+            state_dict[key] = torch.empty(value.size, device=device, **tensor_options)
+        else:
+            # FSDP converts each parameter using its model's sharding group, including hybrid subgroups.
+            model_tensor = model_state_dict.get(key_path[2])
+            process_group = getattr(model_tensor, "_process_group", None)
+            world_size = torch.distributed.get_world_size(process_group)
+            ranks = (
+                [torch.distributed.get_global_rank(process_group, rank) for rank in range(world_size)]
+                if process_group is not None
+                else range(world_size)
+            )
+            placements = [f"rank:{rank}/cpu" for rank in ranks]
+            if device.type != "cpu":
+                device_count = getattr(torch, device.type).device_count()
+                placements = [f"rank:{rank}/{device.type}:{rank % device_count}" for rank in ranks]
+            sharding_spec = ChunkShardingSpec(dim=0, placements=placements)
+            # Allocate only this rank's destination, never a full optimizer tensor on the GPU.
+            state_dict[key] = sharded_tensor.empty(
+                sharding_spec, *value.size, process_group=process_group, **tensor_options
+            )
+
+    state_dict = unflatten_state_dict(state_dict, metadata.planner_data)
+    dist_cp.load(state_dict, storage_reader=reader)
+    optimizer_state = state_dict["optimizer"]
+    # DCP omits empty dictionaries, but FSDP requires an explicit state key for plain SGD.
+    optimizer_state.setdefault("state", {})
+    return optimizer_state
+
+
 def load_fsdp_optimizer(
     fsdp_plugin, accelerator, optimizer, model, input_dir, optimizer_index=0, adapter_only=False, use_dcp=True
 ):
@@ -424,20 +478,27 @@ def load_fsdp_optimizer(
                 )
                 logger.info(f"Loading Optimizer from {ckpt_dir}")
                 if fsdp_plugin.fsdp_version == 1 and fsdp_plugin.state_dict_type == StateDictType.SHARDED_STATE_DICT:
-                    from torch.distributed.checkpoint.optimizer import load_sharded_optimizer_state_dict
-
-                    # A fresh optimizer has no state tensors for DCP to fill; reconstruct them from the checkpoint.
-                    # Only tensors describe optimizer layout; module extra state is restored with the model.
+                    device = accelerator.device
+                    if fsdp_plugin.optim_state_dict_config.offload_to_cpu:
+                        device = torch.device("cpu")
+                    # Extra model state is restored separately and does not describe tensor layout.
                     model_state_dict = {
                         key: value for key, value in model.state_dict().items() if isinstance(value, torch.Tensor)
                     }
-                    optim_state = load_sharded_optimizer_state_dict(
-                        model_state_dict=model_state_dict,
-                        optimizer_key="optimizer",
-                        storage_reader=dist_cp.FileSystemReader(ckpt_dir),
-                    )["optimizer"]
-                    # DCP omits empty dictionaries, but FSDP requires an explicit state key.
-                    optim_state.setdefault("state", {})
+                    from torch.distributed.checkpoint.optimizer import _get_state_dict_2d_layout
+
+                    _, nested_process_group = _get_state_dict_2d_layout(model_state_dict)
+                    if nested_process_group is None:
+                        optim_state = _load_fsdp1_optimizer_state_dict(ckpt_dir, device, model_state_dict)
+                    else:
+                        # Keep the existing model-derived template for nested FSDP/TP layouts.
+                        optim_state = {"optimizer": FSDP.optim_state_dict(model, optimizer)}
+                        dist_cp.load(
+                            state_dict=optim_state,
+                            storage_reader=dist_cp.FileSystemReader(ckpt_dir),
+                            planner=DefaultLoadPlanner(),
+                        )
+                        optim_state = optim_state["optimizer"]
                 else:
                     if fsdp_plugin.fsdp_version == 2:
                         from torch.distributed.checkpoint.state_dict import get_optimizer_state_dict

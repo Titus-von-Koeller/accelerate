@@ -178,14 +178,32 @@ def test_checkpoint_resume(tmp_path, fsdp_version):
 
 @require_cuda
 @require_multi_gpu
-def test_fsdp1_checkpoint_with_empty_optimizer_and_extra_state(tmp_path):
-    """Restore plain SGD and non-tensor model metadata in fresh FSDP1 processes."""
+@pytest.mark.parametrize(
+    "optimizer,initial_state",
+    [
+        ("sgd", "fresh"),
+        ("momentum", "fresh"),
+        ("momentum", "initialized"),
+        ("momentum", "partial"),
+        ("adamw", "fresh"),
+    ],
+)
+def test_fsdp1_optimizer_checkpoint(tmp_path, optimizer, initial_state):
+    """Restore saved optimizer history and metadata using CPU checkpoint destinations."""
     command = get_launch_command(
         config_file=Path(__file__).parent / "fsdp1.yaml",
         fsdp_auto_wrap_policy="NO_WRAP",
         main_process_port=get_torch_dist_unique_port(),
     )
-    command.append(Path(__file__).parent / "optimizer_checkpointing.py")
+    command.extend(
+        [
+            Path(__file__).parent / "optimizer_checkpointing.py",
+            "--optimizer",
+            optimizer,
+            "--initial-state",
+            initial_state,
+        ]
+    )
 
     # Both ranks check their restored optimizer and model metadata inside the worker.
     saved = execute_subprocess_async(command + ["--save-checkpoint", tmp_path])
