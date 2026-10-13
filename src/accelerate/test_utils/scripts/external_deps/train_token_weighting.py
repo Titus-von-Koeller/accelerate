@@ -33,9 +33,10 @@ def run_full_batch_reference(model, input_ids, labels, attention_mask, *, learni
     """Record one full-batch PyTorch update without changing the example's starting model."""
     initial_parameters = parameters_to_vector(model.parameters()).detach()
 
-    # Compute the full-batch mean independently so a scaling bug cannot affect both paths.
     reference_model = copy.deepcopy(model)
     reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
+
+    # Compute the full-batch mean independently so a scaling bug cannot affect both paths.
     logits = reference_model(input_ids=input_ids, attention_mask=attention_mask).logits
     reference_loss = F.cross_entropy(
         input=logits[:, :-1].reshape(-1, model.config.vocab_size),
@@ -44,6 +45,7 @@ def run_full_batch_reference(model, input_ids, labels, attention_mask, *, learni
     )
     reference_loss.backward()
     reference_gradients = torch.cat([parameter.grad.detach().flatten() for parameter in reference_model.parameters()])
+
     reference_optimizer.step()
     reference_parameters = parameters_to_vector(reference_model.parameters()).detach()
 
@@ -124,6 +126,7 @@ def main():
         input_ids[row, length:] = 0
         labels[row, length:] = -100
         attention_mask[row, length:] = 0
+
     # Keep this token as context, but exclude its prediction from the loss.
     # Counting targets from the attention mask would incorrectly include it.
     labels[2, 3] = -100

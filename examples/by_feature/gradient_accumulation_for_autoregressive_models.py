@@ -159,14 +159,13 @@ def training_function(config, args):
         raise NotImplementedError(
             "Gradient accumulation on TPUs is currently not supported. Pass `gradient_accumulation_steps=1`"
         )
-    # Sample hyper-parameters for learning rate, batch size, seed and a few other HPs
+
     lr = config["lr"]
     num_epochs = int(config["num_epochs"])
     seed = int(config["seed"])
     batch_size = int(config["batch_size"])
     max_grad_norm = config["max_grad_norm"]
 
-    # We need to initialize the trackers we use, and also store our configuration
     if args.with_wandb_tracking:
         run = os.path.split(__file__)[-1].split(".")[0]
         run_name = f"{accelerator.num_processes}GPU-grad{gradient_accumulation_steps}-bs{batch_size}"
@@ -178,21 +177,15 @@ def training_function(config, args):
 
     set_seed(seed)
     train_dataloader, eval_dataloader = get_dataloaders(accelerator, batch_size)
-    # Instantiate the model (we build the model here so that the seed also control new weights initialization)
+
     model = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-360M")
 
-    # We could avoid this line since the accelerator is set with `device_placement=True` (default value).
-    # Note that if you are placing tensors on devices manually, this line absolutely needs to be before the optimizer
-    # creation otherwise training will not work on TPU (`accelerate` will kindly throw an error to make us aware of that).
+    # Move the model before creating the optimizer, as required on TPU.
     model = model.to(accelerator.device)
 
-    # Instantiate optimizer
     optimizer = AdamW(params=model.parameters(), lr=lr)
 
-    # Instantiate scheduler
-    lr_scheduler = get_constant_schedule(
-        optimizer=optimizer,
-    )
+    lr_scheduler = get_constant_schedule(optimizer=optimizer)
 
     train(
         accelerator,
