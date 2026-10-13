@@ -55,15 +55,15 @@ def main():
         accelerator.backward(loss)
         optimizer.step()
         optimizer.zero_grad()
-        # Plain SGD legitimately has no optimizer tensors, even after an update.
+        # Plain SGD has no momentum or other state tensors, even after an update.
         assert optimizer.state_dict()["state"] == {}
         metadata.revision = 7
         accelerator.save_state(args.save_checkpoint)
     else:
         accelerator.load_state(args.resume_from_checkpoint)
-        # Model metadata must survive loading without becoming optimizer tensor-layout hints.
+        # Did model metadata survive? It must not be treated as an optimizer tensor.
         assert metadata.revision == 7
-        # DCP omits the empty dictionary; Accelerate must restore it for FSDP.
+        # Did the empty optimizer state survive? The checkpoint reader omits empty dictionaries.
         assert optimizer.state_dict()["state"] == {}
 
     accelerator.end_training()

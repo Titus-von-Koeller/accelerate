@@ -51,16 +51,23 @@ FSDP_VERSIONS = [
 @require_multi_gpu
 @require_huggingface_suite
 def test_training(tmp_path, fsdp_version):
-    """Match plain PyTorch on the same ten FP32 effective batches."""
+    """Train in FP32 on eight examples per update: one GPU with eight, or two GPUs with four each.
+
+    Compare the losses and require both runs to improve on the first batch.
+    A plain-PyTorch reference can expose wrapper bugs that two Accelerate runs could share.
+    """
     config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
     reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8, mixed_precision="no")
     trained = run_training(tmp_path / "trained.json", config_file=config_file, batch_size=4, mixed_precision="no")
 
+    # Did the requested backend run on both GPUs for all ten updates?
     assert trained["ranks"] == expected_ranks
     assert len(reference["losses"]) == len(trained["losses"]) == 10
 
+    # Did training match the reference? Training losses precede each update,
+    # so compare the final measurement too.
     max_loss_difference = 1e-4
     assert_close(trained["losses"], reference["losses"], atol=max_loss_difference, rtol=0)
     assert_close(trained["final_loss"], reference["final_loss"], atol=max_loss_difference, rtol=0)
@@ -77,14 +84,20 @@ def test_training(tmp_path, fsdp_version):
 @require_multi_gpu
 @require_huggingface_suite
 def test_training_mixed_precision(tmp_path, fsdp_version):
-    """Complete finite BF16 training; the worker checks actual compute dtype."""
+    """Does BF16 training complete with finite losses?
+
+    Run ten updates on two GPUs. The worker also checks that a Linear layer produces BF16 output.
+    """
     config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
     trained = run_training(tmp_path / "bf16.json", config_file=config_file, batch_size=4, mixed_precision="bf16")
 
+    # Did the requested backend run on both GPUs for all ten updates?
     assert trained["ranks"] == expected_ranks
     assert len(trained["losses"]) == 10
+
+    # Training losses precede each update; check the final measurement too.
     assert torch.isfinite(torch.tensor(trained["losses"])).all()
     assert torch.isfinite(torch.tensor(trained["final_loss"]))
 
@@ -94,7 +107,11 @@ def test_training_mixed_precision(tmp_path, fsdp_version):
 @require_multi_gpu
 @require_huggingface_suite
 def test_training_with_gradient_accumulation(tmp_path, fsdp_version):
-    """Keep eight FP32 blocks per update: 2 ranks * 4, or 2 ranks * 2 * 2 steps."""
+    """Accumulating two smaller FP32 batches must match one larger batch.
+
+    Keep eight examples per update across two GPUs. Compare four examples per GPU
+    at once with two batches of two examples per GPU.
+    """
     config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
@@ -107,9 +124,12 @@ def test_training_with_gradient_accumulation(tmp_path, fsdp_version):
         gradient_accumulation_steps=2,
     )
 
+    # Did both batch sizes complete the same number of updates on the requested backend?
     assert large_batch["ranks"] == accumulated["ranks"] == expected_ranks
     assert len(large_batch["losses"]) == len(accumulated["losses"]) == 10
 
+    # Did splitting each batch preserve the losses? Training losses precede each update,
+    # so compare the final measurement too.
     assert_close(accumulated["losses"], large_batch["losses"], atol=1e-4, rtol=0)
     assert_close(accumulated["final_loss"], large_batch["final_loss"], atol=1e-4, rtol=0)
 
@@ -179,7 +199,10 @@ def test_checkpoint_resume(tmp_path, fsdp_version):
 @require_cuda
 @require_multi_gpu
 def test_fsdp1_checkpoint_with_empty_optimizer_and_extra_state(tmp_path):
-    """Restore plain SGD and non-tensor model metadata in fresh FSDP1 processes."""
+    """Can FSDP1 restore both an empty optimizer state and dictionary model metadata?
+
+    Save after a plain SGD update, then load the checkpoint in fresh processes.
+    """
     command = get_launch_command(
         config_file=Path(__file__).parent / "fsdp1.yaml",
         fsdp_auto_wrap_policy="NO_WRAP",
