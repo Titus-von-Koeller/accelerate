@@ -29,6 +29,31 @@ from transformers import AutoModelForCausalLM, get_constant_schedule, set_seed
 from accelerate import Accelerator
 
 
+def run_full_batch_reference(model, input_ids, labels, attention_mask, *, learning_rate):
+    """Record one full-batch PyTorch update without changing the example's starting model."""
+    initial_parameters = parameters_to_vector(model.parameters()).detach()
+
+    # Compute the full-batch mean independently so a scaling bug cannot affect both paths.
+    reference_model = copy.deepcopy(model)
+    reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
+    logits = reference_model(input_ids=input_ids, attention_mask=attention_mask).logits
+    reference_loss = F.cross_entropy(
+        input=logits[:, :-1].reshape(-1, model.config.vocab_size),
+        target=labels[:, 1:].reshape(-1),
+        ignore_index=-100,
+    )
+    reference_loss.backward()
+    reference_gradients = torch.cat([parameter.grad.detach().flatten() for parameter in reference_model.parameters()])
+    reference_optimizer.step()
+    reference_parameters = parameters_to_vector(reference_model.parameters()).detach()
+
+    return {
+        "reference_gradients": reference_gradients,
+        "reference_parameters": reference_parameters,
+        "reference_update_norm": (reference_parameters - initial_parameters).norm().item(),
+    }
+
+
 def run_example(example_file, model, samples, *, learning_rate, batch_size, gradient_accumulation_steps):
     """Run the real example and record its target counts, gradients and updated parameters."""
     # Load the selected example by path so we can call its training function.
@@ -108,22 +133,8 @@ def main():
         for ids, targets, mask in zip(input_ids, labels, attention_mask)
     ]
 
-    initial_parameters = parameters_to_vector(model.parameters()).detach()
-
-    # Compute the full-batch mean independently so a scaling bug cannot affect both paths.
-    reference_model = copy.deepcopy(model)
     learning_rate = 0.01
-    reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
-    logits = reference_model(input_ids=input_ids, attention_mask=attention_mask).logits
-    reference_loss = F.cross_entropy(
-        input=logits[:, :-1].reshape(-1, model.config.vocab_size),
-        target=labels[:, 1:].reshape(-1),
-        ignore_index=-100,
-    )
-    reference_loss.backward()
-    reference_gradients = torch.cat([parameter.grad.detach().flatten() for parameter in reference_model.parameters()])
-    reference_optimizer.step()
-    reference_parameters = parameters_to_vector(reference_model.parameters()).detach()
+    reference = run_full_batch_reference(model, input_ids, labels, attention_mask, learning_rate=learning_rate)
 
     # Run the example and record its gradients and update.
     observations = run_example(
@@ -135,12 +146,7 @@ def main():
         gradient_accumulation_steps=2,
     )
 
-    result = {
-        **observations,
-        "reference_gradients": reference_gradients,
-        "reference_parameters": reference_parameters,
-        "reference_update_norm": (reference_parameters - initial_parameters).norm().item(),
-    }
+    result = {**observations, **reference}
     output_file = args.output.with_suffix(f".rank{os.environ['RANK']}.pt")
     torch.save(result, output_file)
 
