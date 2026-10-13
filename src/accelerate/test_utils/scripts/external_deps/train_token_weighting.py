@@ -116,8 +116,8 @@ def main():
     reference_optimizer = torch.optim.AdamW(reference_model.parameters(), lr=learning_rate)
     logits = reference_model(input_ids=input_ids, attention_mask=attention_mask).logits
     reference_loss = F.cross_entropy(
-        logits[:, :-1].reshape(-1, model.config.vocab_size),
-        labels[:, 1:].reshape(-1),
+        input=logits[:, :-1].reshape(-1, model.config.vocab_size),
+        target=labels[:, 1:].reshape(-1),
         ignore_index=-100,
     )
     reference_loss.backward()
