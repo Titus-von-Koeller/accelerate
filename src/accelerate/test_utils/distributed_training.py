@@ -33,6 +33,7 @@ def run_training(
     *,
     batch_size,
     config_file=None,
+    deepspeed_config_file=None,
     reference=False,
     mixed_precision="no",
     gradient_accumulation_steps=1,
@@ -43,7 +44,7 @@ def run_training(
     # Require an explicit setup instead of using the machine's default launch configuration.
     if not reference and config_file is None:
         raise ValueError("Distributed training requires an explicit launch configuration.")
-    if reference and config_file is not None:
+    if reference and (config_file is not None or deepspeed_config_file is not None):
         raise ValueError("The plain-PyTorch reference does not use a launch configuration.")
 
     command = [sys.executable]
@@ -53,6 +54,8 @@ def run_training(
             mixed_precision=mixed_precision,
             main_process_port=get_torch_dist_unique_port(),
         )
+    if deepspeed_config_file is not None:
+        command += ["--deepspeed_config_file", str(deepspeed_config_file)]
     command += [
         path_in_accelerate_package("test_utils", "scripts", "external_deps", script),
         "--output",

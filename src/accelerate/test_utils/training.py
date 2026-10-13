@@ -188,6 +188,11 @@ def observe_backend(accelerator, model):
 
             assert isinstance(model, FSDPModule)
             observation["fsdp_version"] = 2
+    elif accelerator.distributed_type == DistributedType.DEEPSPEED:
+        from deepspeed import DeepSpeedEngine
+
+        assert isinstance(model, DeepSpeedEngine)
+        observation["zero_stage"] = model.zero_optimization_stage()
     elif accelerator.distributed_type == DistributedType.MULTI_GPU:
         assert isinstance(model, torch.nn.parallel.DistributedDataParallel)
     return observation
