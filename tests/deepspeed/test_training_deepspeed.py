@@ -25,6 +25,7 @@ from accelerate.test_utils.testing import require_cuda, require_deepspeed, requi
 from accelerate.utils import is_bf16_available
 
 
+LAUNCH_CONFIG_FILE = Path(__file__).parent / "training.yaml"
 ZERO_STAGES = [pytest.param(1, id="zero1"), pytest.param(2, id="zero2"), pytest.param(3, id="zero3")]
 
 
@@ -35,14 +36,13 @@ ZERO_STAGES = [pytest.param(1, id="zero1"), pytest.param(2, id="zero2"), pytest.
 @require_deepspeed
 def test_training(tmp_path, stage):
     """Match plain PyTorch on the same ten FP32 effective batches."""
-    config_file = Path(__file__).with_name("training.yaml")
-    deepspeed_config_file = Path(__file__).with_name(f"training_zero{stage}.json")
+    deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
     reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8, mixed_precision="no")
     trained = run_training(
         tmp_path / "trained.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=4,
         mixed_precision="no",
@@ -69,13 +69,12 @@ def test_training(tmp_path, stage):
 @require_deepspeed
 def test_training_mixed_precision(tmp_path, stage):
     """Complete finite BF16 training; the worker checks actual compute dtype."""
-    config_file = Path(__file__).with_name("training.yaml")
-    deepspeed_config_file = Path(__file__).with_name(f"training_zero{stage}.json")
+    deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
     trained = run_training(
         tmp_path / "bf16.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=4,
         mixed_precision="bf16",
@@ -94,20 +93,19 @@ def test_training_mixed_precision(tmp_path, stage):
 @require_deepspeed
 def test_training_with_gradient_accumulation(tmp_path, stage):
     """Keep eight FP32 blocks per update: 2 ranks * 4, or 2 ranks * 2 * 2 steps."""
-    config_file = Path(__file__).with_name("training.yaml")
-    deepspeed_config_file = Path(__file__).with_name(f"training_zero{stage}.json")
+    deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
     large_batch = run_training(
         tmp_path / "large.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=4,
         mixed_precision="no",
     )
     accumulated = run_training(
         tmp_path / "accumulated.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=2,
         mixed_precision="no",
@@ -132,13 +130,12 @@ def test_checkpoint_resume(tmp_path, stage):
     Save after five updates, exit, and load in fresh processes for the remaining five.
     Compare the examples, learning rates and losses; momentum makes weights alone insufficient.
     """
-    config_file = Path(__file__).with_name("training.yaml")
-    deepspeed_config_file = Path(__file__).with_name(f"training_zero{stage}.json")
+    deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
     checkpoint = tmp_path / "checkpoint"
     uninterrupted = run_training(
         tmp_path / "uninterrupted.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=2,
         mixed_precision="no",
@@ -147,7 +144,7 @@ def test_checkpoint_resume(tmp_path, stage):
     )
     partial = run_training(
         tmp_path / "partial.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=2,
         mixed_precision="no",
@@ -157,7 +154,7 @@ def test_checkpoint_resume(tmp_path, stage):
     )
     resumed = run_training(
         tmp_path / "resumed.json",
-        config_file=config_file,
+        config_file=LAUNCH_CONFIG_FILE,
         deepspeed_config_file=deepspeed_config_file,
         batch_size=2,
         mixed_precision="no",
@@ -197,8 +194,8 @@ def test_zero3_mixed_precision_with_gradient_accumulation(tmp_path):
     """Complete finite BF16 training with two accumulation steps and sharded parameters."""
     trained = run_training(
         tmp_path / "bf16_accumulated.json",
-        config_file=Path(__file__).with_name("training.yaml"),
-        deepspeed_config_file=Path(__file__).with_name("training_zero3.json"),
+        config_file=LAUNCH_CONFIG_FILE,
+        deepspeed_config_file=Path(__file__).parent / "training_zero3.json",
         batch_size=2,
         mixed_precision="bf16",
         gradient_accumulation_steps=2,
