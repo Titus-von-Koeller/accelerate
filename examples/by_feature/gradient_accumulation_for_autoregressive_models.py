@@ -177,14 +177,8 @@ def training_function(config, args):
 
     set_seed(seed)
     train_dataloader, eval_dataloader = get_dataloaders(accelerator, batch_size)
-
-    model = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-360M")
-
-    # Move the model before creating the optimizer, as required on TPU.
-    model = model.to(accelerator.device)
-
+    model = AutoModelForCausalLM.from_pretrained("HuggingFaceTB/SmolLM-360M").to(accelerator.device)
     optimizer = AdamW(params=model.parameters(), lr=lr)
-
     lr_scheduler = get_constant_schedule(optimizer=optimizer)
 
     train(
