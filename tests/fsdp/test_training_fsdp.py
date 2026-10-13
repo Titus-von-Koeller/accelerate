@@ -21,7 +21,14 @@ import torch
 from torch.testing import assert_close
 
 from accelerate.test_utils.distributed_training import run_training
-from accelerate.test_utils.testing import require_cuda, require_huggingface_suite, require_multi_gpu
+from accelerate.test_utils.testing import (
+    execute_subprocess_async,
+    get_launch_command,
+    get_torch_dist_unique_port,
+    require_cuda,
+    require_huggingface_suite,
+    require_multi_gpu,
+)
 from accelerate.utils import is_bf16_available, is_torch_version
 from accelerate.utils.constants import FSDP2_PYTORCH_VERSION
 
@@ -167,3 +174,21 @@ def test_checkpoint_resume(tmp_path, fsdp_version):
     # Agreement also accepts two runs that never learn; require progress on the first batch.
     min_loss_decrease = 1e-4
     assert uninterrupted["final_loss"] < uninterrupted["losses"][0] - min_loss_decrease
+
+
+@require_cuda
+@require_multi_gpu
+def test_fsdp1_checkpoint_with_empty_optimizer_and_extra_state(tmp_path):
+    """Restore plain SGD and non-tensor model metadata in fresh FSDP1 processes."""
+    command = get_launch_command(
+        config_file=Path(__file__).with_name("fsdp1.yaml"),
+        fsdp_auto_wrap_policy="NO_WRAP",
+        main_process_port=get_torch_dist_unique_port(),
+    )
+    command.append(Path(__file__).with_name("optimizer_checkpointing.py"))
+
+    # Both ranks check their restored optimizer and model metadata inside the worker.
+    saved = execute_subprocess_async(command + ["--save-checkpoint", tmp_path])
+    assert saved.returncode == 0, saved.stderr
+    restored = execute_subprocess_async(command + ["--resume-from-checkpoint", tmp_path])
+    assert restored.returncode == 0, restored.stderr
