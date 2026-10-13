@@ -52,7 +52,7 @@ FSDP_VERSIONS = [
 @require_huggingface_suite
 def test_training(tmp_path, fsdp_version):
     """Match plain PyTorch on the same ten FP32 effective batches."""
-    config_file = Path(__file__).with_name(f"fsdp{fsdp_version}.yaml")
+    config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
     reference = run_training(tmp_path / "reference.json", reference=True, batch_size=8, mixed_precision="no")
@@ -78,7 +78,7 @@ def test_training(tmp_path, fsdp_version):
 @require_huggingface_suite
 def test_training_mixed_precision(tmp_path, fsdp_version):
     """Complete finite BF16 training; the worker checks actual compute dtype."""
-    config_file = Path(__file__).with_name(f"fsdp{fsdp_version}.yaml")
+    config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
     trained = run_training(tmp_path / "bf16.json", config_file=config_file, batch_size=4, mixed_precision="bf16")
@@ -95,7 +95,7 @@ def test_training_mixed_precision(tmp_path, fsdp_version):
 @require_huggingface_suite
 def test_training_with_gradient_accumulation(tmp_path, fsdp_version):
     """Keep eight FP32 blocks per update: 2 ranks * 4, or 2 ranks * 2 * 2 steps."""
-    config_file = Path(__file__).with_name(f"fsdp{fsdp_version}.yaml")
+    config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
 
     large_batch = run_training(tmp_path / "large.json", config_file=config_file, batch_size=4, mixed_precision="no")
@@ -124,7 +124,7 @@ def test_checkpoint_resume(tmp_path, fsdp_version):
     Save after five updates, exit, and load in fresh processes for the remaining five.
     Compare the examples, learning rates and losses; momentum makes weights alone insufficient.
     """
-    config_file = Path(__file__).with_name(f"fsdp{fsdp_version}.yaml")
+    config_file = Path(__file__).parent / f"fsdp{fsdp_version}.yaml"
     expected_ranks = [{"backend": "FSDP", "world_size": 2, "fsdp_version": fsdp_version}] * 2
     checkpoint = tmp_path / "checkpoint"
     uninterrupted = run_training(
@@ -181,11 +181,11 @@ def test_checkpoint_resume(tmp_path, fsdp_version):
 def test_fsdp1_checkpoint_with_empty_optimizer_and_extra_state(tmp_path):
     """Restore plain SGD and non-tensor model metadata in fresh FSDP1 processes."""
     command = get_launch_command(
-        config_file=Path(__file__).with_name("fsdp1.yaml"),
+        config_file=Path(__file__).parent / "fsdp1.yaml",
         fsdp_auto_wrap_policy="NO_WRAP",
         main_process_port=get_torch_dist_unique_port(),
     )
-    command.append(Path(__file__).with_name("optimizer_checkpointing.py"))
+    command.append(Path(__file__).parent / "optimizer_checkpointing.py")
 
     # Both ranks check their restored optimizer and model metadata inside the worker.
     saved = execute_subprocess_async(command + ["--save-checkpoint", tmp_path])
