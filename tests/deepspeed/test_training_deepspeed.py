@@ -35,7 +35,11 @@ ZERO_STAGES = [pytest.param(1, id="zero1"), pytest.param(2, id="zero2"), pytest.
 @require_huggingface_suite
 @require_deepspeed
 def test_training(tmp_path, stage):
-    """Match plain PyTorch on the same ten FP32 effective batches."""
+    """Train in FP32 on eight examples per update: one GPU with eight, or two GPUs with four each.
+
+    Compare the losses and require both runs to improve on the first batch.
+    A plain-PyTorch reference can expose wrapper bugs that two Accelerate runs could share.
+    """
     deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
@@ -48,9 +52,12 @@ def test_training(tmp_path, stage):
         mixed_precision="no",
     )
 
+    # Did the requested backend run on both GPUs for all ten updates?
     assert trained["ranks"] == expected_ranks
     assert len(reference["losses"]) == len(trained["losses"]) == 10
 
+    # Did training match the reference? Training losses precede each update,
+    # so compare the final measurement too.
     max_loss_difference = 1e-4
     assert_close(trained["losses"], reference["losses"], atol=max_loss_difference, rtol=0)
     assert_close(trained["final_loss"], reference["final_loss"], atol=max_loss_difference, rtol=0)
@@ -68,7 +75,10 @@ def test_training(tmp_path, stage):
 @require_huggingface_suite
 @require_deepspeed
 def test_training_mixed_precision(tmp_path, stage):
-    """Complete finite BF16 training; the worker checks actual compute dtype."""
+    """Does BF16 training complete with finite losses?
+
+    Run ten updates on two GPUs. The worker also checks that a Linear layer produces BF16 output.
+    """
     deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
@@ -80,8 +90,11 @@ def test_training_mixed_precision(tmp_path, stage):
         mixed_precision="bf16",
     )
 
+    # Did the requested backend run on both GPUs for all ten updates?
     assert trained["ranks"] == expected_ranks
     assert len(trained["losses"]) == 10
+
+    # Training losses precede each update; check the final measurement too.
     assert torch.isfinite(torch.tensor(trained["losses"])).all()
     assert torch.isfinite(torch.tensor(trained["final_loss"]))
 
@@ -92,7 +105,11 @@ def test_training_mixed_precision(tmp_path, stage):
 @require_huggingface_suite
 @require_deepspeed
 def test_training_with_gradient_accumulation(tmp_path, stage):
-    """Keep eight FP32 blocks per update: 2 ranks * 4, or 2 ranks * 2 * 2 steps."""
+    """Accumulating two smaller FP32 batches must match one larger batch.
+
+    Keep eight examples per update across two GPUs. Compare four examples per GPU
+    at once with two batches of two examples per GPU.
+    """
     deepspeed_config_file = Path(__file__).parent / f"training_zero{stage}.json"
     expected_ranks = [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": stage}] * 2
 
@@ -112,9 +129,12 @@ def test_training_with_gradient_accumulation(tmp_path, stage):
         gradient_accumulation_steps=2,
     )
 
+    # Did both batch sizes complete the same number of updates on the requested backend?
     assert large_batch["ranks"] == accumulated["ranks"] == expected_ranks
     assert len(large_batch["losses"]) == len(accumulated["losses"]) == 10
 
+    # Did splitting each batch preserve the losses? Training losses precede each update,
+    # so compare the final measurement too.
     assert_close(accumulated["losses"], large_batch["losses"], atol=1e-4, rtol=0)
     assert_close(accumulated["final_loss"], large_batch["final_loss"], atol=1e-4, rtol=0)
 
@@ -191,7 +211,11 @@ def test_checkpoint_resume(tmp_path, stage):
 @require_huggingface_suite
 @require_deepspeed
 def test_zero3_mixed_precision_with_gradient_accumulation(tmp_path):
-    """Complete finite BF16 training with two accumulation steps and sharded parameters."""
+    """Does BF16 training complete when ZeRO3 also accumulates gradients?
+
+    Accumulate two batches of two examples per GPU, keeping eight examples per update.
+    Require finite losses; the worker also checks that a Linear layer produces BF16 output.
+    """
     trained = run_training(
         tmp_path / "bf16_accumulated.json",
         config_file=LAUNCH_CONFIG_FILE,
@@ -201,7 +225,10 @@ def test_zero3_mixed_precision_with_gradient_accumulation(tmp_path):
         gradient_accumulation_steps=2,
     )
 
+    # Did ZeRO3 run on both GPUs for all ten updates?
     assert trained["ranks"] == [{"backend": "DEEPSPEED", "world_size": 2, "zero_stage": 3}] * 2
     assert len(trained["losses"]) == 10
+
+    # Training losses precede each update; check the final measurement too.
     assert torch.isfinite(torch.tensor(trained["losses"])).all()
     assert torch.isfinite(torch.tensor(trained["final_loss"]))
