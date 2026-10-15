@@ -152,7 +152,7 @@ class TestExecuteSubprocessAsync:
 
     @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
-        """A worker can keep output pipes open after its launcher exits."""
+        """A timeout must stop surviving workers so they do not keep consuming resources."""
         code = (
             "import json, subprocess, sys\n"
             "from pathlib import Path\n"
