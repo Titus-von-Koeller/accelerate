@@ -169,6 +169,7 @@ class TestExecuteSubprocessAsync:
         assert_subprocesses_stopped(subprocess_pid_file)
 
     def test_reader_failure_stops_child(self, subprocess_pid_file):
+        """Failure to decode output must not leave the child running."""
         code = (
             "import json, os, time\n"
             "from pathlib import Path\n"
