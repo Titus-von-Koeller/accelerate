@@ -23,6 +23,7 @@ import time
 import unittest
 import warnings
 from collections import UserDict, namedtuple
+from textwrap import dedent
 from types import SimpleNamespace
 from typing import NamedTuple, Optional
 from unittest.mock import Mock, patch
@@ -116,34 +117,42 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async(command, echo=False)
 
     def test_drains_both_output_streams(self):
-        command = [
-            sys.executable,
-            "-c",
-            "import sys\nfor _ in range(1000):\n    print('out' * 100)\n    print('err' * 100, file=sys.stderr)\n",
-        ]
+        """Reading only one pipe can block a verbose child; successful runs must retain both outputs."""
+        child_code = dedent("""
+            import sys
 
-        result = execute_subprocess_async(command, timeout=5, quiet=True, echo=False)
+            for _ in range(1000):
+                print("out" * 100)
+                print("err" * 100, file=sys.stderr)
+        """)
+
+        result = execute_subprocess_async([sys.executable, "-c", child_code], timeout=5, quiet=True, echo=False)
 
         assert result.stdout == ["out" * 100] * 1000
         assert result.stderr == ["err" * 100] * 1000
 
     @pytest.mark.parametrize("close_output", [False, True], ids=["open-pipes", "closed-pipes"])
     def test_timeout_stops_child(self, subprocess_pid_file, close_output):
-        code = (
-            "import json, os, sys, time\n"
-            "from pathlib import Path\n"
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
-            "print('started', flush=True)\n"
-            "print('diagnostic', file=sys.stderr, flush=True)\n"
-        )
-        # Closing output pipes does not mean the process has exited.
-        if close_output:
-            code += "os.close(1)\nos.close(2)\n"
-        code += "time.sleep(5)"
+        """A timeout must stop the child even if its output is closed, and retain diagnostics."""
+        child_code = dedent(f"""
+            import json
+            import os
+            import sys
+            import time
+            from pathlib import Path
+
+            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            print("started", flush=True)
+            print("diagnostic", file=sys.stderr, flush=True)
+            if {close_output}:
+                os.close(1)
+                os.close(2)
+            time.sleep(5)
+        """)
 
         started = time.monotonic()
         with pytest.raises(TimeoutError, match="timed out") as error:
-            execute_subprocess_async([sys.executable, "-c", code], timeout=1, quiet=True, echo=False)
+            execute_subprocess_async([sys.executable, "-c", child_code], timeout=1, quiet=True, echo=False)
 
         assert time.monotonic() - started < 4
         assert "started" in str(error.value)
@@ -152,64 +161,86 @@ class TestExecuteSubprocessAsync:
 
     @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
-        """A timeout must stop surviving workers so they do not keep consuming resources."""
-        code = (
-            "import json, subprocess, sys\n"
-            "from pathlib import Path\n"
-            "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([worker.pid]))"
-        )
+        """A timeout must stop surviving workers so they do not keep consuming resources.
+
+        helper -> launcher (exits) -> worker (keeps running with inherited output pipes)
+        """
+        launcher_code = dedent(f"""
+            import json
+            import subprocess
+            import sys
+            from pathlib import Path
+
+            worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
+            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([worker.pid]))
+        """)
 
         started = time.monotonic()
         with pytest.raises(TimeoutError, match="timed out"):
-            execute_subprocess_async([sys.executable, "-c", code], timeout=1, quiet=True, echo=False)
+            execute_subprocess_async([sys.executable, "-c", launcher_code], timeout=1, quiet=True, echo=False)
 
         # A worker that finishes its sleep naturally must not count as successful cleanup.
         assert time.monotonic() - started < 4
         assert_subprocesses_stopped(subprocess_pid_file)
 
     def test_reader_failure_stops_child(self, subprocess_pid_file):
-        """Failure to decode output must not leave the child running."""
-        code = (
-            "import json, os, time\n"
-            "from pathlib import Path\n"
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
-            "os.write(1, bytes([255, 10]))\n"
-            "time.sleep(5)"
-        )
+        """The helper must stop its child before propagating an output-reading exception."""
+        child_code = dedent(rf"""
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            # Invalid UTF-8 triggers a reader exception without terminating the child.
+            os.write(1, b"\xff\n")
+            time.sleep(5)
+        """)
 
         started = time.monotonic()
         with pytest.raises(UnicodeDecodeError):
-            execute_subprocess_async([sys.executable, "-c", code], timeout=2, quiet=True, echo=False)
+            execute_subprocess_async([sys.executable, "-c", child_code], timeout=2, quiet=True, echo=False)
 
         assert time.monotonic() - started < 4
         assert_subprocesses_stopped(subprocess_pid_file)
 
     @unittest.skipUnless(os.name == "posix", "POSIX SIGINT behavior")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
-        """A child in a new session needs cleanup when its caller is interrupted."""
-        child = (
-            "import json, os, time\n"
-            "from pathlib import Path\n"
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
-            "time.sleep(5)"
-        )
-        code = (
-            "import sys\n"
-            "from accelerate.test_utils.testing import execute_subprocess_async\n"
-            "try:\n"
-            f"    execute_subprocess_async([sys.executable, '-c', {child!r}], echo=False)\n"
-            "except KeyboardInterrupt:\n"
-            "    print('interrupted')\n"
-        )
+        """An interrupted caller must clean up its child in a separate session.
 
+        pytest -> supervisor running the helper -> sleeping child
+        Only the supervisor receives SIGINT; the helper must stop the child.
+        """
+        child_code = dedent(f"""
+            import json
+            import os
+            import time
+            from pathlib import Path
+
+            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            time.sleep(5)
+        """)
+        supervisor_code = dedent(f"""
+            import sys
+            from accelerate.test_utils.testing import execute_subprocess_async
+
+            try:
+                execute_subprocess_async([sys.executable, "-c", {child_code!r}], echo=False)
+            except KeyboardInterrupt:
+                print("interrupted")
+        """)
+
+        # Run the helper in another process so sending SIGINT does not interrupt pytest.
         supervisor = subprocess.Popen(
-            [sys.executable, "-c", code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, start_new_session=True
+            [sys.executable, "-c", supervisor_code],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
         )
         try:
-            for _ in range(500):
-                if subprocess_pid_file.exists():
-                    break
+            # Wait for the child to start, so SIGINT tests cleanup rather than interrupting imports.
+            startup_deadline = time.monotonic() + 5
+            while not subprocess_pid_file.exists() and time.monotonic() < startup_deadline:
                 time.sleep(0.01)
             assert subprocess_pid_file.exists(), "Child did not start"
 
@@ -220,6 +251,7 @@ class TestExecuteSubprocessAsync:
             assert b"interrupted" in stdout
             assert_subprocesses_stopped(subprocess_pid_file)
         finally:
+            # Keep a failed test from leaving its supervisor running.
             if supervisor.poll() is None:
                 supervisor.kill()
             supervisor.communicate(timeout=5)
