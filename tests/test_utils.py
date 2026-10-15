@@ -136,6 +136,7 @@ class TestExecuteSubprocessAsync:
             "print('started', flush=True)\n"
             "print('diagnostic', file=sys.stderr, flush=True)\n"
         )
+        # Closing output pipes does not mean the process has exited.
         if close_output:
             code += "os.close(1)\nos.close(2)\n"
         code += "time.sleep(5)"
@@ -151,6 +152,7 @@ class TestExecuteSubprocessAsync:
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
+        """A worker can keep output pipes open after its launcher exits."""
         code = (
             "import json, subprocess, sys\n"
             "from pathlib import Path\n"
@@ -184,6 +186,7 @@ class TestExecuteSubprocessAsync:
 
     @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT behavior")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
+        """A child in a new session needs cleanup when its caller is interrupted."""
         child = (
             "import json, os, time\n"
             "from pathlib import Path\n"
