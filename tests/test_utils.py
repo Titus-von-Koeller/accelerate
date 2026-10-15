@@ -108,7 +108,7 @@ def assert_subprocesses_stopped(pid_file):
 
 
 class TestExecuteSubprocessAsync:
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX signal exit codes")
+    @unittest.skipUnless(os.name == "posix", "POSIX signal exit codes")
     def test_signal_exit_raises(self):
         command = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
 
@@ -150,7 +150,7 @@ class TestExecuteSubprocessAsync:
         assert "diagnostic" in str(error.value)
         assert_subprocesses_stopped(subprocess_pid_file)
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup")
+    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
         """A worker can keep output pipes open after its launcher exits."""
         code = (
@@ -184,7 +184,7 @@ class TestExecuteSubprocessAsync:
         assert time.monotonic() - started < 4
         assert_subprocesses_stopped(subprocess_pid_file)
 
-    @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT behavior")
+    @unittest.skipUnless(os.name == "posix", "POSIX SIGINT behavior")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
         """A child in a new session needs cleanup when its caller is interrupted."""
         child = (
