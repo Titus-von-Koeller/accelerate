@@ -756,7 +756,7 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
     if echo:
         print("\nRunning: ", " ".join(cmd))
 
-    p = await asyncio.create_subprocess_exec(
+    process = await asyncio.create_subprocess_exec(
         cmd[0],
         *cmd[1:],
         stdin=stdin,
@@ -769,8 +769,8 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
         start_new_session=os.name == "posix",
     )
 
-    out = []
-    err = []
+    stdout_lines = []
+    stderr_lines = []
 
     def tee(line, sink, pipe, label=""):
         line = line.decode("utf-8").rstrip()
@@ -779,9 +779,13 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
             print(label, line, file=pipe)
 
     tasks = [
-        asyncio.create_task(_read_stream(p.stdout, lambda l: tee(l, out, sys.stdout, label="stdout:"))),
-        asyncio.create_task(_read_stream(p.stderr, lambda l: tee(l, err, sys.stderr, label="stderr:"))),
-        asyncio.create_task(p.wait()),
+        asyncio.create_task(
+            _read_stream(process.stdout, lambda line: tee(line, stdout_lines, sys.stdout, label="stdout:"))
+        ),
+        asyncio.create_task(
+            _read_stream(process.stderr, lambda line: tee(line, stderr_lines, sys.stderr, label="stderr:"))
+        ),
+        asyncio.create_task(process.wait()),
     ]
     try:
         # Drain both pipes while waiting for exit, including when a child closes
@@ -792,9 +796,9 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
             if os.name == "posix":
                 # The group belongs to this launch. Its workers may still be alive
                 # even when the launcher has already exited.
-                os.killpg(p.pid, signal.SIGKILL)
-            elif p.returncode is None:
-                p.kill()
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
         except ProcessLookupError:
             pass
         finally:
@@ -803,18 +807,18 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
             await asyncio.gather(*tasks, return_exceptions=True)
             # Continue draining after cancellation: waiting for exit alone can
             # deadlock when a pipe's reader transport is paused on buffered data.
-            stdout, stderr = await p.communicate()
-            out.extend(stdout.decode("utf-8", errors="replace").splitlines())
-            err.extend(stderr.decode("utf-8", errors="replace").splitlines())
+            stdout, stderr = await process.communicate()
+            stdout_lines.extend(stdout.decode("utf-8", errors="replace").splitlines())
+            stderr_lines.extend(stderr.decode("utf-8", errors="replace").splitlines())
 
         if isinstance(error, asyncio.TimeoutError):
-            stdout, stderr = "\n".join(out), "\n".join(err)
+            stdout, stderr = "\n".join(stdout_lines), "\n".join(stderr_lines)
             raise TimeoutError(
                 f"'{' '.join(map(str, cmd))}' timed out after {timeout} seconds\n\n"
                 f"Captured stdout:\n{stdout}\n\nCaptured stderr:\n{stderr}"
             ) from error
         raise
-    return _RunOutput(p.returncode, out, err)
+    return _RunOutput(process.returncode, stdout_lines, stderr_lines)
 
 
 def execute_subprocess_async(cmd: list, env=None, stdin=None, timeout=None, quiet=False, echo=True) -> _RunOutput:

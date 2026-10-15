@@ -130,12 +130,14 @@ class TestExecuteSubprocessAsync:
     @pytest.mark.parametrize("close_output", [False, True], ids=["open-pipes", "closed-pipes"])
     def test_timeout_stops_child(self, subprocess_pid_file, close_output):
         code = (
-            "import json, os, sys, time; from pathlib import Path; "
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()])); "
-            "print('started', flush=True); print('diagnostic', file=sys.stderr, flush=True); "
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
+            "print('started', flush=True)\n"
+            "print('diagnostic', file=sys.stderr, flush=True)\n"
         )
         if close_output:
-            code += "os.close(1); os.close(2); "
+            code += "os.close(1)\nos.close(2)\n"
         code += "time.sleep(5)"
 
         started = time.monotonic()
@@ -150,8 +152,9 @@ class TestExecuteSubprocessAsync:
     @pytest.mark.skipif(os.name != "posix", reason="POSIX process-group cleanup")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
         code = (
-            "import json, subprocess, sys; from pathlib import Path; "
-            "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)']); "
+            "import json, subprocess, sys\n"
+            "from pathlib import Path\n"
+            "worker = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(5)'])\n"
             f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([worker.pid]))"
         )
 
@@ -165,9 +168,11 @@ class TestExecuteSubprocessAsync:
 
     def test_reader_failure_stops_child(self, subprocess_pid_file):
         code = (
-            "import json, os, time; from pathlib import Path; "
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()])); "
-            "os.write(1, bytes([255, 10])); time.sleep(5)"
+            "import json, os, time\n"
+            "from pathlib import Path\n"
+            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
+            "os.write(1, bytes([255, 10]))\n"
+            "time.sleep(5)"
         )
 
         started = time.monotonic()
@@ -180,14 +185,18 @@ class TestExecuteSubprocessAsync:
     @pytest.mark.skipif(os.name != "posix", reason="POSIX SIGINT behavior")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
         child = (
-            "import json, os, time; from pathlib import Path; "
-            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()])); time.sleep(5)"
+            "import json, os, time\n"
+            "from pathlib import Path\n"
+            f"Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))\n"
+            "time.sleep(5)"
         )
         code = (
-            "import sys\nfrom accelerate.test_utils.testing import execute_subprocess_async\n"
+            "import sys\n"
+            "from accelerate.test_utils.testing import execute_subprocess_async\n"
             "try:\n"
             f"    execute_subprocess_async([sys.executable, '-c', {child!r}], echo=False)\n"
-            "except KeyboardInterrupt:\n    print('interrupted')\n"
+            "except KeyboardInterrupt:\n"
+            "    print('interrupted')\n"
         )
 
         supervisor = subprocess.Popen(
