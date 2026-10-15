@@ -763,6 +763,8 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
+        # POSIX-only: isolate the launch so cleanup can kill its process group.
+        # On Windows, cleanup below kills only the direct child.
         start_new_session=os.name == "posix",
     )
 
