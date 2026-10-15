@@ -184,7 +184,10 @@ class TestExecuteSubprocessAsync:
         assert_subprocesses_stopped(subprocess_pid_file)
 
     def test_reader_failure_stops_child(self, subprocess_pid_file):
-        """The helper must stop its child before propagating an output-reading exception."""
+        """The helper must stop its child before propagating an output-reading exception.
+
+        Invalid UTF-8 is only a convenient exception trigger; this test checks process cleanup.
+        """
         child_code = dedent(rf"""
             import json
             import os
@@ -192,7 +195,6 @@ class TestExecuteSubprocessAsync:
             from pathlib import Path
 
             Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
-            # Invalid UTF-8 triggers a reader exception without terminating the child.
             os.write(1, b"\xff\n")
             time.sleep(5)
         """)
