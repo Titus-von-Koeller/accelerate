@@ -763,8 +763,9 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=env,
-        # POSIX-only: isolate the launch so cleanup can kill its process group.
-        # On Windows, cleanup below kills only the direct child.
+        # On POSIX, put the launcher in a new process group so cleanup can stop
+        # it and workers in that group without killing the test runner.
+        # Windows cleanup stops only the direct child.
         start_new_session=os.name == "posix",
     )
 
