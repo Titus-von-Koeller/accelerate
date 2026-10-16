@@ -86,7 +86,7 @@ ExampleNamedTuple = namedtuple("ExampleNamedTuple", "a b c")
 def subprocess_pid_file(tmp_path):
     pid_file = tmp_path / "pids.json"
     yield pid_file
-    # Also clean up when a regression prevents the helper from stopping its children.
+    # Tests check that the helper stopped its processes before this fallback cleanup runs.
     if pid_file.exists():
         for pid in json.loads(pid_file.read_text()):
             try:
@@ -118,7 +118,10 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async(command, echo=False)
 
     def test_drains_both_output_streams(self):
-        """Read both streams while the child runs to avoid a full-buffer deadlock.
+        """Preserve complete output when changing how readers and process exit are awaited.
+
+        Successful process exit alone does not establish that all output was captured;
+        compare the complete stdout and stderr results as well.
 
         Reading stdout to completion before stderr can leave the child blocked writing
         stderr, while the helper waits for the child to finish and close stdout.
@@ -134,7 +137,6 @@ class TestExecuteSubprocessAsync:
 
         result = execute_subprocess_async([sys.executable, "-c", child_code], timeout=5, quiet=True, echo=False)
 
-        # Successful completion alone would miss lost, truncated or mixed-up output.
         assert result.stdout == ["out" * 100] * 1000
         assert result.stderr == ["err" * 100] * 1000
 
