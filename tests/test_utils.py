@@ -12,7 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import builtins
-import json
 import os
 import pickle
 import signal
@@ -84,28 +83,26 @@ ExampleNamedTuple = namedtuple("ExampleNamedTuple", "a b c")
 
 @pytest.fixture
 def subprocess_pid_file(tmp_path):
-    pid_file = tmp_path / "pids.json"
+    pid_file = tmp_path / "process.pid"
     yield pid_file
-    # Tests check that the helper stopped its processes before this fallback cleanup runs.
+    # Tests check that the helper stopped its process before this fallback cleanup runs.
     if pid_file.exists():
-        for pid in json.loads(pid_file.read_text()):
-            try:
-                process = psutil.Process(pid)
-                process.kill()
-                process.wait(timeout=2)
-            except (psutil.NoSuchProcess, psutil.TimeoutExpired):
-                pass
-
-
-def assert_subprocesses_stopped(pid_file):
-    for pid in json.loads(pid_file.read_text()):
         try:
-            process = psutil.Process(pid)
-            assert not process.is_running() or process.status() == psutil.STATUS_ZOMBIE, (
-                f"Subprocess {pid} is still running"
-            )
-        except psutil.NoSuchProcess:
+            process = psutil.Process(int(pid_file.read_text()))
+            process.kill()
+            process.wait(timeout=2)
+        except (psutil.NoSuchProcess, psutil.TimeoutExpired):
             pass
+
+
+def assert_subprocess_stopped(pid_file):
+    try:
+        process = psutil.Process(int(pid_file.read_text()))
+        assert not process.is_running() or process.status() == psutil.STATUS_ZOMBIE, (
+            f"Subprocess {process.pid} is still running"
+        )
+    except psutil.NoSuchProcess:
+        pass
 
 
 class TestExecuteSubprocessAsync:
@@ -149,13 +146,12 @@ class TestExecuteSubprocessAsync:
         messages explaining what happened before the child stalled.
         """
         child_code = dedent(f"""
-            import json
             import os
             import sys
             import time
             from pathlib import Path
 
-            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            Path({str(subprocess_pid_file)!r}).write_text(str(os.getpid()))
             print("started", flush=True)
             print("diagnostic", file=sys.stderr, flush=True)
             if {close_output}:
@@ -171,7 +167,7 @@ class TestExecuteSubprocessAsync:
         assert time.monotonic() - started < 4
         assert "Captured stdout:\nstarted" in str(error.value)
         assert "Captured stderr:\ndiagnostic" in str(error.value)
-        assert_subprocesses_stopped(subprocess_pid_file)
+        assert_subprocess_stopped(subprocess_pid_file)
 
     @unittest.skipUnless(os.name == "posix", "Process-group cleanup requires POSIX")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
@@ -180,13 +176,12 @@ class TestExecuteSubprocessAsync:
         helper -> launcher (exits) -> worker (keeps running with inherited output pipes)
         """
         launcher_code = dedent(f"""
-            import json
             import subprocess
             import sys
             from pathlib import Path
 
             worker = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
-            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([worker.pid]))
+            Path({str(subprocess_pid_file)!r}).write_text(str(worker.pid))
         """)
 
         started = time.monotonic()
@@ -195,7 +190,7 @@ class TestExecuteSubprocessAsync:
 
         # A worker that finishes its sleep naturally must not count as successful cleanup.
         assert time.monotonic() - started < 4
-        assert_subprocesses_stopped(subprocess_pid_file)
+        assert_subprocess_stopped(subprocess_pid_file)
 
     def test_reader_failure_stops_child(self, subprocess_pid_file):
         """The helper must stop its child before propagating an output-reading exception.
@@ -203,12 +198,11 @@ class TestExecuteSubprocessAsync:
         Invalid UTF-8 is only a convenient exception trigger; this test checks process cleanup.
         """
         child_code = dedent(rf"""
-            import json
             import os
             import time
             from pathlib import Path
 
-            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            Path({str(subprocess_pid_file)!r}).write_text(str(os.getpid()))
             os.write(1, b"\xff\n")
             time.sleep(5)
         """)
@@ -218,7 +212,7 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async([sys.executable, "-c", child_code], timeout=2, quiet=True, echo=False)
 
         assert time.monotonic() - started < 4
-        assert_subprocesses_stopped(subprocess_pid_file)
+        assert_subprocess_stopped(subprocess_pid_file)
 
     @unittest.skipUnless(os.name == "posix", "Sending SIGINT directly to a process requires POSIX")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
@@ -228,12 +222,11 @@ class TestExecuteSubprocessAsync:
         Only the supervisor receives SIGINT; the helper must stop the child.
         """
         child_code = dedent(f"""
-            import json
             import os
             import time
             from pathlib import Path
 
-            Path({str(subprocess_pid_file)!r}).write_text(json.dumps([os.getpid()]))
+            Path({str(subprocess_pid_file)!r}).write_text(str(os.getpid()))
             time.sleep(5)
         """)
         supervisor_code = dedent(f"""
@@ -265,7 +258,7 @@ class TestExecuteSubprocessAsync:
 
             assert supervisor.returncode == 0, stderr.decode()
             assert b"interrupted" in stdout
-            assert_subprocesses_stopped(subprocess_pid_file)
+            assert_subprocess_stopped(subprocess_pid_file)
         finally:
             # Keep a failed test from leaving its supervisor running.
             if supervisor.poll() is None:
