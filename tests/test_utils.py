@@ -115,13 +115,11 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async(command, echo=False)
 
     def test_drains_both_output_streams(self):
-        """Preserve complete output when changing how readers and process exit are awaited.
+        """Changing the waiting logic must preserve output capture without hanging.
 
-        Successful process exit alone does not establish that all output was captured;
-        compare the complete stdout and stderr results as well.
-
-        Reading stdout to completion before stderr can leave the child blocked writing
-        stderr, while the helper waits for the child to finish and close stdout.
+        The child writes enough to both streams to expose sequential reading: it can
+        block writing stderr while the helper waits for stdout to close. Full-list
+        comparisons also catch missing output even when the child exits successfully.
         https://docs.python.org/3.12/library/asyncio-subprocess.html#asyncio.subprocess.Process.wait
         """
         child_code = dedent("""

@@ -743,13 +743,23 @@ class _RunOutput:
         self.stderr = stderr
 
 
-async def _read_stream(stream, callback):
-    while True:
-        line = await stream.readline()
-        if line:
-            callback(line)
-        else:
-            break
+async def _stop_subprocess(process, tasks):
+    try:
+        if os.name == "posix":
+            # Workers may still be alive even after their launcher has exited.
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
+    finally:
+        for task in tasks:
+            task.cancel()
+        # Finish cancelling the readers before communicate reads from the same pipes.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        # Waiting for exit without draining buffered output can deadlock.
+        stdout, stderr = await process.communicate()
+    return stdout, stderr
 
 
 async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=False, echo=False) -> _RunOutput:
@@ -772,19 +782,19 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
     stdout_lines = []
     stderr_lines = []
 
-    def tee(line, sink, pipe, label=""):
-        line = line.decode("utf-8").rstrip()
-        sink.append(line)
-        if not quiet:
-            print(label, line, file=pipe)
+    async def read_output(stream, lines, console, label):
+        while True:
+            raw_line = await stream.readline()
+            if not raw_line:
+                break
+            line = raw_line.decode("utf-8").rstrip()
+            lines.append(line)
+            if not quiet:
+                print(label, line, file=console)
 
     tasks = [
-        asyncio.create_task(
-            _read_stream(process.stdout, lambda line: tee(line, stdout_lines, sys.stdout, label="stdout:"))
-        ),
-        asyncio.create_task(
-            _read_stream(process.stderr, lambda line: tee(line, stderr_lines, sys.stderr, label="stderr:"))
-        ),
+        asyncio.create_task(read_output(process.stdout, stdout_lines, sys.stdout, "stdout:")),
+        asyncio.create_task(read_output(process.stderr, stderr_lines, sys.stderr, "stderr:")),
         asyncio.create_task(process.wait()),
     ]
     try:
@@ -792,24 +802,10 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
         # its pipes early or a worker inherits them after its launcher exits.
         await asyncio.wait_for(asyncio.gather(*tasks), timeout=timeout)
     except BaseException as error:
-        try:
-            if os.name == "posix":
-                # The group belongs to this launch. Its workers may still be alive
-                # even when the launcher has already exited.
-                os.killpg(process.pid, signal.SIGKILL)
-            elif process.returncode is None:
-                process.kill()
-        except ProcessLookupError:
-            pass
-        finally:
-            for task in tasks:
-                task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
-            # Continue draining after cancellation: waiting for exit alone can
-            # deadlock when a pipe's reader transport is paused on buffered data.
-            stdout, stderr = await process.communicate()
-            stdout_lines.extend(stdout.decode("utf-8", errors="replace").splitlines())
-            stderr_lines.extend(stderr.decode("utf-8", errors="replace").splitlines())
+        # Cancellation must stop the launched processes too, then propagate to the caller.
+        stdout, stderr = await _stop_subprocess(process, tasks)
+        stdout_lines.extend(stdout.decode("utf-8", errors="replace").splitlines())
+        stderr_lines.extend(stderr.decode("utf-8", errors="replace").splitlines())
 
         if isinstance(error, asyncio.TimeoutError):
             stdout, stderr = "\n".join(stdout_lines), "\n".join(stderr_lines)
@@ -818,6 +814,7 @@ async def _stream_subprocess(cmd, env=None, stdin=None, timeout=None, quiet=Fals
                 f"Captured stdout:\n{stdout}\n\nCaptured stderr:\n{stderr}"
             ) from error
         raise
+
     return _RunOutput(process.returncode, stdout_lines, stderr_lines)
 
 
