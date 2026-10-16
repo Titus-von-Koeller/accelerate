@@ -118,7 +118,12 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async(command, echo=False)
 
     def test_drains_both_output_streams(self):
-        """A child can hang if either output buffer fills; read both streams while it runs."""
+        """Read both streams while the child runs to avoid a full-buffer deadlock.
+
+        Reading stdout to completion before stderr can leave the child blocked writing
+        stderr, while the helper waits for the child to finish and close stdout.
+        https://docs.python.org/3.12/library/asyncio-subprocess.html#asyncio.subprocess.Process.wait
+        """
         child_code = dedent("""
             import sys
 
@@ -135,7 +140,12 @@ class TestExecuteSubprocessAsync:
 
     @pytest.mark.parametrize("close_output", [False, True], ids=["open-pipes", "closed-pipes"])
     def test_timeout_stops_child(self, subprocess_pid_file, close_output):
-        """A timeout must stop the child even if its output is closed, and retain diagnostics."""
+        """A timeout must stop the child even if its output is closed, and retain diagnostics.
+
+        The helper raises TimeoutError instead of returning a result, so the exception
+        must carry the captured stdout and stderr. Otherwise the caller loses the
+        messages explaining what happened before the child stalled.
+        """
         child_code = dedent(f"""
             import json
             import os
