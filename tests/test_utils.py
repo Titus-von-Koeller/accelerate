@@ -118,7 +118,7 @@ class TestExecuteSubprocessAsync:
             execute_subprocess_async(command, echo=False)
 
     def test_drains_both_output_streams(self):
-        """Reading only one pipe can block a verbose child; successful runs must retain both outputs."""
+        """A child can hang if either output buffer fills; read both streams while it runs."""
         child_code = dedent("""
             import sys
 
