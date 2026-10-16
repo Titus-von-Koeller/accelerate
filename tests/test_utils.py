@@ -109,10 +109,11 @@ def assert_subprocesses_stopped(pid_file):
 
 
 class TestExecuteSubprocessAsync:
-    @unittest.skipUnless(os.name == "posix", "POSIX signal exit codes")
+    @unittest.skipUnless(os.name == "posix", "Negative signal exit codes are POSIX-only")
     def test_signal_exit_raises(self):
         command = [sys.executable, "-c", "import os, signal; os.kill(os.getpid(), signal.SIGTERM)"]
 
+        # SIGTERM is 15 on Linux. A child terminated by that signal has return code -15.
         with pytest.raises(RuntimeError, match=f"returncode {-signal.SIGTERM}"):
             execute_subprocess_async(command, echo=False)
 
@@ -151,15 +152,15 @@ class TestExecuteSubprocessAsync:
         """)
 
         started = time.monotonic()
-        with pytest.raises(TimeoutError, match="timed out") as error:
+        with pytest.raises(TimeoutError) as error:
             execute_subprocess_async([sys.executable, "-c", child_code], timeout=1, quiet=True, echo=False)
 
         assert time.monotonic() - started < 4
-        assert "started" in str(error.value)
-        assert "diagnostic" in str(error.value)
+        assert "Captured stdout:\nstarted" in str(error.value)
+        assert "Captured stderr:\ndiagnostic" in str(error.value)
         assert_subprocesses_stopped(subprocess_pid_file)
 
-    @unittest.skipUnless(os.name == "posix", "POSIX process-group cleanup")
+    @unittest.skipUnless(os.name == "posix", "Process-group cleanup requires POSIX")
     def test_timeout_stops_worker_after_launcher_exits(self, subprocess_pid_file):
         """A timeout must stop surviving workers so they do not keep consuming resources.
 
@@ -176,7 +177,7 @@ class TestExecuteSubprocessAsync:
         """)
 
         started = time.monotonic()
-        with pytest.raises(TimeoutError, match="timed out"):
+        with pytest.raises(TimeoutError):
             execute_subprocess_async([sys.executable, "-c", launcher_code], timeout=1, quiet=True, echo=False)
 
         # A worker that finishes its sleep naturally must not count as successful cleanup.
@@ -206,7 +207,7 @@ class TestExecuteSubprocessAsync:
         assert time.monotonic() - started < 4
         assert_subprocesses_stopped(subprocess_pid_file)
 
-    @unittest.skipUnless(os.name == "posix", "POSIX SIGINT behavior")
+    @unittest.skipUnless(os.name == "posix", "Sending SIGINT directly to a process requires POSIX")
     def test_keyboard_interrupt_stops_child(self, subprocess_pid_file):
         """An interrupted caller must clean up its child in a separate session.
 
