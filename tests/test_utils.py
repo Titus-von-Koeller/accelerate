@@ -129,6 +129,7 @@ class TestExecuteSubprocessAsync:
 
         result = execute_subprocess_async([sys.executable, "-c", child_code], timeout=5, quiet=True, echo=False)
 
+        # Successful completion alone would miss lost, truncated or mixed-up output.
         assert result.stdout == ["out" * 100] * 1000
         assert result.stderr == ["err" * 100] * 1000
 
